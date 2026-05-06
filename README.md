@@ -1,0 +1,198 @@
+# merakiops
+
+[![PyPI - Version](https://img.shields.io/pypi/v/merakiops.svg)](https://pypi.org/project/merakiops)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/merakiops.svg)](https://pypi.org/project/merakiops)
+
+A Python library for creating, submitting, and verifying [Meraki](https://meraki.cisco.com/) API action batches.
+
+Built on top of [merakisync](https://github.com/nathanea05/merakisync), merakiops lets you apply configuration changes across thousands of Meraki networks reliably and at scale.
+
+---
+
+## What it does
+
+merakiops provides two classes:
+
+- **`Action`** — wraps a single Meraki API change (update, create, or destroy) on a typed `merakisync` model object.
+- **`ActionBatch`** — groups Actions into Meraki API action batches, handles the 100-action limit automatically, submits them to Meraki, and verifies the results.
+
+---
+
+## Requirements
+
+- Python 3.10+
+- [merakisync](https://github.com/nathanea05/merakisync) installed and configured
+
+---
+
+## Installation
+
+```console
+pip install merakiops
+```
+
+---
+
+## Quick start
+
+```python
+from merakisync.models.switchport import Switchport
+from merakiops import Action, ActionBatch
+
+# 1. Fetch current state from your merakisync database
+ports = Switchport.get(serial="Q2AB-1234-5678", source="database")
+
+# 2. Modify the objects you want to change
+for port in ports:
+    if port.vlan == 100:
+        port.vlan = 200
+
+# 3. Create Actions from the changed objects
+actions = [Action.update(port) for port in ports if port._changed_fields]
+
+# 4. Build batches — automatically split at 100 actions each
+batches = ActionBatch.from_actions(
+    actions,
+    organization_id="123456",
+    confirmed=False,     # does not execute until confirm() is called
+    synchronous=False,
+)
+
+# 5. Submit, confirm, and verify
+for batch in batches:
+    batch.create()            # POST to Meraki; sleeps 5s after submission
+    batch.confirm()           # queue for execution
+    batch.status()            # poll completion state
+    result = batch.verify()   # compare live resource state against intended changes
+
+    print(f"Verified:     {len(result['verified'])}")
+    print(f"Mismatched:   {len(result['mismatched'])}")
+    print(f"Unverifiable: {len(result['unverifiable'])}")
+```
+
+---
+
+## Actions
+
+Each `Action` corresponds to a single API call within a batch. Always use the factory classmethods.
+
+### update — modify an existing resource
+
+Only the fields that changed are included in the request body.
+
+```python
+from merakiops import Action
+
+port.vlan = 200
+port.name = "uplink"
+action = Action.update(port)
+```
+
+### create — add a new resource
+
+All fields from the object are included. The request goes to the collection endpoint.
+
+```python
+from merakisync.models.vlan import Vlan
+
+new_vlan = Vlan(network_id="N_123", vlan_id=200, name="Finance", ...)
+action = Action.create(new_vlan)
+```
+
+### destroy — delete a resource
+
+No body is sent. The resource is identified by its path.
+
+```python
+action = Action.destroy(old_vlan)
+```
+
+---
+
+## ActionBatch
+
+### from_actions() — create batches
+
+Splits your actions into batches that respect Meraki's limits automatically.
+
+```python
+batches = ActionBatch.from_actions(
+    actions,
+    organization_id="123456",
+    confirmed=False,      # default — batches do not execute until confirm()
+    synchronous=False,    # default — async execution
+    callback=None,        # optional Meraki webhook callback config
+)
+```
+
+| Mode | Max actions per batch |
+|---|---|
+| Asynchronous (`synchronous=False`) | 100 |
+| Synchronous (`synchronous=True`) | 20 |
+
+### create() — submit to Meraki
+
+```python
+batch.create()                  # sleeps 5 seconds after submission by default
+batch.create(sleep_seconds=0)   # disable throttling
+```
+
+### confirm() — execute the batch
+
+Only needed when the batch was created with `confirmed=False`.
+
+```python
+batch.confirm()
+```
+
+### status() — check completion
+
+```python
+status = batch.status()
+# {"completed": True, "failed": False, "errors": []}
+```
+
+### verify() — check results
+
+Fetches the current state of each resource from the Meraki API and compares it against the intended changes.
+
+```python
+result = batch.verify()
+
+result["verified"]      # Actions where all fields matched
+result["mismatched"]    # [{"action": ..., "mismatches": {"vlan": {"expected": 200, "actual": 100}}}]
+result["unverifiable"]  # Actions that could not be verified
+```
+
+Supported models for verify: `Network`, `Device`, `Switchport`, `Vlan`, `Ssid`, `L3FirewallRule`, `DhcpServerPolicy`, `Organization`
+
+---
+
+## Batch limits
+
+Meraki enforces the following limits on action batches:
+
+| Limit | Value |
+|---|---|
+| Max actions per async batch | 100 |
+| Max actions per synchronous batch | 20 |
+
+`ActionBatch.from_actions()` handles splitting automatically. If you pass 250 actions, you get 3 batches (100, 100, 50). You never need to count or split manually.
+
+See [docs/batch-limits.md](docs/batch-limits.md) for more detail.
+
+---
+
+## Full usage guide
+
+See [docs/usage.md](docs/usage.md) for complete examples including:
+- Updating switchport configurations across many devices
+- Creating and destroying VLANs
+- Verifying changes and handling mismatches
+- Working with synchronous batches
+
+---
+
+## License
+
+`merakiops` is distributed under the terms of the [MIT](https://spdx.org/licenses/MIT.html) license.
