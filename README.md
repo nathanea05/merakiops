@@ -62,9 +62,9 @@ batches = ActionBatch.from_actions(
 for batch in batches:
     batch.create()     # POST to Meraki; sleeps 5s after submission
     batch.confirm()    # queue for execution
-    batch.status()     # poll completion state
 
-# 6. Verify all batches together — minimizes API calls
+# 6. Wait for Meraki to finish, then verify together
+ActionBatch.wait_for_all(batches)
 results = ActionBatch.verify_many(batches)
 for batch, result in results.items():
     print(f"Verified:     {len(result['verified'])}")
@@ -152,6 +152,25 @@ batch.confirm()
 ```python
 status = batch.status()
 # {"completed": True, "failed": False, "errors": []}
+```
+
+### `wait_for_all()` — wait for async batches to finish
+
+For async batches, call this before `verify_many()`. `create()` returns immediately after Meraki accepts the batch — changes are not applied until the batch finishes executing.
+
+```python
+ActionBatch.wait_for_all(batches)                              # default 120s timeout
+ActionBatch.wait_for_all(batches, timeout_seconds=300)         # custom timeout
+ActionBatch.wait_for_all(batches, poll_interval=5.0)           # custom poll interval
+```
+
+Returns `{batch: bool}` — `True` if completed, `False` if failed.
+
+### `wait_until_complete()` — wait for a single batch
+
+```python
+batch.wait_until_complete()
+batch.wait_until_complete(timeout_seconds=60, poll_interval=2.0)
 ```
 
 ### `verify_many()` — check results across batches (preferred)

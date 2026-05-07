@@ -33,12 +33,28 @@ Code review checklist for changes to merakiops.
 - [ ] `verify()` compares `action.body` keys (camelCase) against `current.to_meraki_dict()` output
 - [ ] `errors`, `created_resources` initialized to `[]` in `__init__` (not class-level defaults)
 
-## _fetch_current_state
+## wait_until_complete / wait_for_all
+
+- [ ] `wait_until_complete()` is a no-op for synchronous batches (returns immediately)
+- [ ] `wait_until_complete()` raises `RuntimeError` if `self.id` is `None`
+- [ ] `wait_until_complete()` raises `TimeoutError` (not `RuntimeError`) when deadline is exceeded
+- [ ] `wait_until_complete()` respects remaining time on the final sleep (no over-sleeping past deadline)
+- [ ] `wait_for_all()` raises `ValueError` for an empty list
+- [ ] `wait_for_all()` raises `RuntimeError` if any batch is unsubmitted
+- [ ] `wait_for_all()` raises `TimeoutError` listing incomplete batch IDs
+- [ ] `wait_for_all()` continues polling remaining batches when one fails (does not stop early)
+- [ ] `wait_for_all()` skips synchronous and already-completed batches in the pending list
+- [ ] `wait_for_all()` returns `{batch: bool}` for all batches, including sync and already-done ones
+
+## _bulk_fetch_model
 
 - [ ] All model imports are deferred (inside the function body)
-- [ ] Returns `(True, obj)` for a found resource, `(True, None)` for not found, `(False, None)` for unsupported
+- [ ] Returns `(lookup, failed_pk_keys)` — a tuple, not just the lookup
+- [ ] Org-level models (Device, Network, Organization): one call, all failures mark all source objs failed
+- [ ] Serial-level (Switchport): grouped by serial, failure marks only that serial's objects failed
+- [ ] Network-level (Vlan, Ssid, L3FirewallRule, DhcpServerPolicy): grouped by network_id, failure marks only that network's objects failed
 - [ ] `DhcpServerPolicy` handled correctly — `get()` returns a single instance or `None`, not a list
-- [ ] `L3FirewallRule` handled correctly — fetches all rules, filters by `rule_order`
+- [ ] `L3FirewallRule` handled correctly — fetches all rules for the network, keyed by `_pk_key(rule)`
 - [ ] `Organization` handled correctly — fetches all orgs, filters by `obj.id`
 
 ## General

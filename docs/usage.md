@@ -63,13 +63,13 @@ else:
         confirmed=False,
     )
 
-    # 5. Submit each batch
+    # 5. Submit and confirm all batches
     for batch in batches:
         batch.create()     # submits to Meraki; sleeps 5s
         batch.confirm()    # queues for execution
-        batch.status()     # wait for completion status
 
-        # Verify all batches together — one bulk fetch per model type, not per action
+    # 6. Wait for all batches to finish, then verify together
+    ActionBatch.wait_for_all(batches)
     results = ActionBatch.verify_many(batches)
     for batch, result in results.items():
         print(f"Batch {batch.id}:")
@@ -217,29 +217,52 @@ An action is "unverifiable" (not an error) when:
 
 ---
 
-## Checking batch status before verify()
+## Waiting for async batches to finish
 
-For asynchronous batches, the batch may still be executing when you call `status()`. Poll until it completes before calling verify:
+For asynchronous batches (the default), `create()` returns as soon as Meraki accepts the batch — changes have not been applied yet. Calling `verify_many()` immediately will compare against the pre-change state and report everything as mismatched.
+
+Always call `wait_for_all()` before `verify_many()`:
 
 ```python
-import time
-
 for batch in batches:
     batch.create()
     batch.confirm()
 
-# Poll all batches until they complete or fail
-for batch in batches:
-    while not batch.completed and not batch.failed:
-        time.sleep(2)
-        batch.status()
+# Waits until all batches complete or fail (timeout=120s by default)
+ActionBatch.wait_for_all(batches)
 
-    if batch.failed:
-        print(f"Batch {batch.id} failed: {batch.errors}")
-
-# Verify all at once after all batches have completed
+# Now safe to verify — Meraki has finished applying all changes
 results = ActionBatch.verify_many(batches)
 ```
+
+For a single batch, use `wait_until_complete()`:
+
+```python
+batch.create()
+batch.confirm()
+batch.wait_until_complete()
+result = batch.verify()
+```
+
+Custom timeout and poll interval:
+
+```python
+ActionBatch.wait_for_all(batches, timeout_seconds=300, poll_interval=5.0)
+```
+
+`wait_for_all()` returns `{batch: bool}` mapping each batch to `True` (completed) or `False` (failed). Check the return value if you need to handle failures before verifying:
+
+```python
+completion = ActionBatch.wait_for_all(batches)
+failed_batches = [b for b, ok in completion.items() if not ok]
+if failed_batches:
+    for b in failed_batches:
+        print(f"Batch {b.id} failed: {b.errors}")
+
+results = ActionBatch.verify_many(batches)
+```
+
+**Synchronous batches** (`synchronous=True`) do not need this step — `create()` blocks until all actions complete. `wait_for_all()` is safe to call on them but returns immediately.
 
 ---
 

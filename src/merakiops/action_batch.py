@@ -347,6 +347,184 @@ class ActionBatch:
         return status_data
 
     # ------------------------------------------------------------------
+    # Waiting
+    # ------------------------------------------------------------------
+
+    def wait_until_complete(
+        self,
+        *,
+        timeout_seconds: float = 120.0,
+        poll_interval: float = 3.0,
+        dashboard=None,
+    ) -> bool:
+        """Poll until this batch has completed or failed.
+
+        Not needed for synchronous batches — create() already blocks until
+        all actions have finished. For asynchronous batches (the default),
+        call this before verify() to avoid comparing against state that
+        Meraki has not yet changed.
+
+        Args:
+            timeout_seconds: Maximum seconds to wait before raising TimeoutError.
+                             Default 120.
+            poll_interval:   Seconds between each status poll. Default 3.0.
+            dashboard:       Optional DashboardAPI instance. If not provided,
+                             get_dashboard() from merakisync is called.
+
+        Returns:
+            True if the batch completed without errors.
+            False if the batch failed.
+
+        Raises:
+            RuntimeError: If the batch has not been submitted yet (id is None).
+            TimeoutError: If the batch does not finish within timeout_seconds.
+
+        Example:
+            batch.create()
+            batch.confirm()
+            batch.wait_until_complete()
+            result = batch.verify()
+        """
+        if self.id is None:
+            raise RuntimeError(
+                "This batch has not been submitted yet. Call create() first."
+            )
+
+        if self.synchronous:
+            # Synchronous batches complete before create() returns.
+            logger.debug("Batch %s is synchronous — already complete", self.id)
+            return not self.failed
+
+        if self.completed or self.failed:
+            return self.completed and not self.failed
+
+        logger.info(
+            "Waiting for batch %s to complete (timeout=%.0fs, poll=%.1fs)",
+            self.id,
+            timeout_seconds,
+            poll_interval,
+        )
+
+        deadline = time.time() + timeout_seconds
+
+        while not self.completed and not self.failed:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Batch {self.id} did not complete within {timeout_seconds}s. "
+                    "Call batch.status() to check the current state."
+                )
+            time.sleep(min(poll_interval, remaining))
+            self.status(dashboard=dashboard)
+
+        if self.failed:
+            logger.warning("Batch %s failed: %s", self.id, self.errors)
+        else:
+            logger.info("Batch %s completed", self.id)
+
+        return self.completed and not self.failed
+
+    @classmethod
+    def wait_for_all(
+        cls,
+        batches: list[ActionBatch],
+        *,
+        timeout_seconds: float = 120.0,
+        poll_interval: float = 3.0,
+        dashboard=None,
+    ) -> dict[ActionBatch, bool]:
+        """Wait for multiple batches to complete, polling all of them together.
+
+        Polls all pending batches each interval and removes them from the wait
+        list as they finish. Because Meraki processes async batches in parallel
+        on its side, a batch submitted earlier may already be complete by the
+        time we first poll it — this method takes advantage of that by checking
+        all pending batches each round rather than waiting for each one in turn.
+
+        Synchronous batches are skipped (they complete before create() returns).
+        Failed batches do not cause this method to stop — all batches are waited
+        on regardless. Check the return value to see which succeeded and which failed.
+
+        Prefer this over calling wait_until_complete() individually when working
+        with multiple batches, and call verify_many() after it completes.
+
+        Args:
+            batches:         List of ActionBatch objects to wait for. All must
+                             have been submitted (id must not be None).
+            timeout_seconds: Maximum total seconds to wait before raising
+                             TimeoutError. Default 120.
+            poll_interval:   Seconds between each round of status polls.
+                             Default 3.0.
+            dashboard:       Optional DashboardAPI instance.
+
+        Returns:
+            A dict mapping each batch to True (completed) or False (failed).
+
+        Raises:
+            ValueError:   If batches is empty.
+            RuntimeError: If any batch has not been submitted yet.
+            TimeoutError: If not all batches complete within timeout_seconds.
+
+        Example:
+            for batch in batches:
+                batch.create()
+                batch.confirm()
+
+            ActionBatch.wait_for_all(batches)
+            results = ActionBatch.verify_many(batches)
+        """
+        if not batches:
+            raise ValueError("batches cannot be empty")
+
+        unsubmitted = [b for b in batches if b.id is None]
+        if unsubmitted:
+            raise RuntimeError(
+                f"{len(unsubmitted)} batch(es) have not been submitted yet. "
+                "Call create() on each batch before calling wait_for_all()."
+            )
+
+        # Synchronous batches are already done; only poll async ones.
+        pending = [
+            b for b in batches
+            if not b.synchronous and not b.completed and not b.failed
+        ]
+
+        if pending:
+            logger.info(
+                "Waiting for %d async batch(es) to complete (timeout=%.0fs)",
+                len(pending),
+                timeout_seconds,
+            )
+
+        deadline = time.time() + timeout_seconds
+
+        while pending:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"{len(pending)} batch(es) did not complete within "
+                    f"{timeout_seconds}s. "
+                    f"Incomplete batch IDs: {[b.id for b in pending]}"
+                )
+
+            time.sleep(min(poll_interval, remaining))
+
+            still_pending = []
+            for batch in pending:
+                batch.status(dashboard=dashboard)
+                if batch.completed:
+                    logger.debug("Batch %s completed", batch.id)
+                elif batch.failed:
+                    logger.warning("Batch %s failed: %s", batch.id, batch.errors)
+                else:
+                    still_pending.append(batch)
+
+            pending = still_pending
+
+        logger.info("All %d batch(es) finished", len(batches))
+        return {batch: batch.completed and not batch.failed for batch in batches}
+
+    # ------------------------------------------------------------------
     # Verification
     # ------------------------------------------------------------------
 

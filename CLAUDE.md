@@ -130,23 +130,36 @@ No raw dicts passed to callers. No API calls outside the ActionBatch methods.
 ### Method lifecycle
 
 ```
-ActionBatch.from_actions()   — creates batch objects; splits if needed
+ActionBatch.from_actions()         — creates batch objects; splits if needed
     │
-    └─► create()             — submits to Meraki; sets self.id; sleeps 5s
-    └─► confirm()            — executes the batch (only needed if confirmed=False)
-    └─► status()             — polls current batch completion state
-    └─► verify()             — compares live resource state against action.body
+    └─► create()                   — submits to Meraki; sets self.id; sleeps 5s
+    └─► confirm()                  — executes the batch (only needed if confirmed=False)
+    └─► wait_until_complete()      — polls until completed/failed (async batches only)
+    └─► status()                   — single poll of current batch state
+    └─► verify()                   — compares live resource state against action.body
+
+ActionBatch.wait_for_all(batches)  — polls all batches together until all finish
+ActionBatch.verify_many(batches)   — verifies all batches with minimal API calls
 ```
 
-### verify() behavior
+### Async vs synchronous timing
 
-- `verify()` calls `source_obj.__class__.get(source="meraki", ...)` for each action
-- merakisync model.get() manages its own API connectivity; no `dashboard` arg is accepted
+For **async batches** (`synchronous=False`, the default), `create()` returns as soon as Meraki accepts the batch. Changes have not been applied yet. Always call `wait_until_complete()` or `wait_for_all()` before `verify()` or `verify_many()`, otherwise verify will compare against the pre-change state and report everything as mismatched.
+
+For **synchronous batches** (`synchronous=True`), `create()` blocks until all actions complete. `wait_until_complete()` and `wait_for_all()` are no-ops for these batches.
+
+### verify() and verify_many() behavior
+
+- Uses bulk fetching: 1 API call per org (Device/Network), 1 per serial (Switchport), 1 per network (Vlan/Ssid/L3FirewallRule/DhcpServerPolicy)
+- `verify_many()` is preferred for 10+ actions — pools fetches across all batches
+- merakisync model.get() manages its own API connectivity; `verify()` accepts no `dashboard` arg
 - Supported models: `Network`, `Device`, `Switchport`, `Vlan`, `Ssid`, `L3FirewallRule`, `DhcpServerPolicy`, `Organization`
-- Actions without `source_obj` → reported as "unverifiable" (not an error)
-- Unsupported model types → reported as "unverifiable" (not an error)
+- Actions without `source_obj` → "unverifiable" (not an error)
+- Unsupported model types → "unverifiable" (not an error)
+- API fetch errors for a group → all actions in that group become "unverifiable"
 - Destroy operations: resource not found → "verified"; resource still exists → "mismatched"
-- Returns: `{"verified": [...], "mismatched": [...], "unverifiable": [...]}`
+- `verify()` returns `{"verified": [...], "mismatched": [...], "unverifiable": [...]}`
+- `verify_many()` returns `{batch: {"verified": [...], "mismatched": [...], "unverifiable": [...]}}`
 
 ---
 
