@@ -15,9 +15,23 @@ Code review checklist for changes to merakiops.
 - [ ] `to_meraki_action()` returns a dict with only `resource`, `operation`, and optionally `body`
 - [ ] No new fields added to `to_meraki_action()` output unless explicitly required by the Meraki API
 
+## VerifyResult / Mismatch
+
+- [ ] `VerifyResult` and `Mismatch` live in `result.py`, not `action_batch.py`
+- [ ] Both are exported from `__init__.py`
+- [ ] `VerifyResult` has `.verified`, `.mismatched`, `.unverifiable`, `.batch_errors`
+- [ ] `VerifyResult.__repr__` shows counts, not full list contents
+- [ ] `Mismatch` has `.action` and `.mismatches` (no string-keyed dict access)
+- [ ] `batch_errors` is populated from `batch.errors` at `VerifyResult` construction time
+
 ## ActionBatch
 
-- [ ] Created via `ActionBatch.from_actions()` in all examples and documentation
+- [ ] `run()` accepts `actions` (not batches) and returns a single combined `VerifyResult`
+- [ ] `run()` calls `create()`, `confirm()`, `wait_for_all()`, `verify_many()` in that order
+- [ ] `run()` passes all relevant kwargs (sleep_seconds, timeout_seconds, poll_interval, dashboard) through
+- [ ] `verify()` returns `VerifyResult`, not a plain dict
+- [ ] `verify_many()` returns `dict[ActionBatch, VerifyResult]`, not `dict[ActionBatch, dict]`
+- [ ] Created via `ActionBatch.from_actions()` or `ActionBatch.run()` in all examples
 - [ ] `from_actions()` raises `ValueError` for an empty actions list
 - [ ] `from_actions()` splits at 100 actions for async, 20 for synchronous
 - [ ] `create()` raises `RuntimeError` if `self.id` is already set
@@ -69,7 +83,7 @@ Code review checklist for changes to merakiops.
 - [ ] Error messages tell the user what to do next, not just what failed
 - [ ] `get_dashboard()` imported from `merakisync.dashboard`, not from `merakisync`
 - [ ] Imports from merakisync use the submodule path (e.g., `from merakisync.dashboard import ...`)
-- [ ] `__init__.py` exports `Action` and `ActionBatch` only
+- [ ] `__init__.py` exports `Action`, `ActionBatch`, `Mismatch`, and `VerifyResult`
 
 ## Meraki API compliance
 

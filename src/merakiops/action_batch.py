@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING
 
 from merakiops.action import Action
+from merakiops.result import Mismatch, VerifyResult
 
 if TYPE_CHECKING:
     from merakisync.models.base import MerakiObj
@@ -547,7 +548,7 @@ class ActionBatch:
     # Verification
     # ------------------------------------------------------------------
 
-    def verify(self) -> dict:
+    def verify(self) -> VerifyResult:
         """Compare each action's intended state against the current live state.
 
         Uses bulk fetching to minimize API calls:
@@ -559,14 +560,8 @@ class ActionBatch:
         to pool resource fetches across all batches and reduce API calls further.
 
         Returns:
-            A dict with three keys:
-                "verified":      list of Actions where all body fields matched.
-                "mismatched":    list of dicts, each with keys "action" and
-                                 "mismatches". mismatches maps camelCase field
-                                 names to {"expected": ..., "actual": ...}.
-                "unverifiable":  list of Actions that could not be checked —
-                                 source_obj not stored, model type not supported,
-                                 or an API error occurred during fetch.
+            A VerifyResult with .verified, .mismatched, .unverifiable, and
+            .batch_errors attributes.
 
         Raises:
             RuntimeError: If the batch has not been submitted yet (id is None).
@@ -580,7 +575,7 @@ class ActionBatch:
         return results[self]
 
     @classmethod
-    def verify_many(cls, batches: list[ActionBatch]) -> dict[ActionBatch, dict]:
+    def verify_many(cls, batches: list[ActionBatch]) -> dict[ActionBatch, VerifyResult]:
         """Verify multiple batches with minimal API calls.
 
         Preferred over calling batch.verify() individually when sending 10 or
@@ -599,14 +594,8 @@ class ActionBatch:
                      have been submitted (id must not be None).
 
         Returns:
-            A dict mapping each ActionBatch to its own result dict:
-                {
-                    batch: {
-                        "verified":     list[Action],
-                        "mismatched":   list[dict],   # {"action": ..., "mismatches": {...}}
-                        "unverifiable": list[Action],
-                    }
-                }
+            A dict mapping each ActionBatch to a VerifyResult. Each VerifyResult
+            has .verified, .mismatched, .unverifiable, and .batch_errors.
 
         Raises:
             ValueError: If batches is empty.
@@ -615,10 +604,9 @@ class ActionBatch:
         Example:
             results = ActionBatch.verify_many(batches)
             for batch, result in results.items():
-                print(f"Batch {batch.id}:")
-                print(f"  Verified:     {len(result['verified'])}")
-                print(f"  Mismatched:   {len(result['mismatched'])}")
-                print(f"  Unverifiable: {len(result['unverifiable'])}")
+                print(f"Batch {batch.id}: {result}")
+                for mismatch in result.mismatched:
+                    print(f"  {mismatch.action.resource}: {mismatch.mismatches}")
         """
         if not batches:
             raise ValueError("batches cannot be empty")
@@ -635,12 +623,107 @@ class ActionBatch:
         for batch in batches:
             by_org.setdefault(batch.organization_id, []).append(batch)
 
-        combined: dict[ActionBatch, dict] = {}
+        combined: dict[ActionBatch, VerifyResult] = {}
         for org_id, org_batches in by_org.items():
             org_results = _verify_actions(org_batches, org_id)
             combined.update(org_results)
 
         return combined
+
+    @classmethod
+    def run(
+        cls,
+        actions: list[Action],
+        organization_id: str,
+        *,
+        confirmed: bool = False,
+        synchronous: bool = False,
+        callback: dict | None = None,
+        sleep_seconds: float = 5.0,
+        timeout_seconds: float = 120.0,
+        poll_interval: float = 3.0,
+        dashboard=None,
+    ) -> VerifyResult:
+        """Create batches, submit, wait, and verify in one call.
+
+        Covers the full lifecycle for the common case. Splits actions into
+        batches automatically, submits and confirms all of them, waits for
+        completion, verifies the results, and returns a single combined
+        VerifyResult.
+
+        For retry logic, call run() in a loop using result.mismatched:
+
+            remaining = initial_actions
+            for attempt in range(max_retries):
+                result = ActionBatch.run(remaining, organization_id=org.id)
+                remaining = [m.action for m in result.mismatched]
+                if not remaining:
+                    break
+
+        Args:
+            actions:         List of Action objects to submit. Must not be empty.
+            organization_id: Meraki organization ID that owns these resources.
+            confirmed:       Whether batches execute immediately on create().
+                             Default False — confirm() is called automatically
+                             after create() regardless of this setting.
+            synchronous:     Whether Meraki executes the batch synchronously.
+                             Default False.
+            callback:        Optional Meraki webhook callback config dict.
+            sleep_seconds:   Seconds to sleep between batch submissions.
+                             Default 5.0.
+            timeout_seconds: Maximum seconds to wait for all batches to finish.
+                             Default 120.
+            poll_interval:   Seconds between status polls. Default 3.0.
+            dashboard:       Optional DashboardAPI instance. If not provided,
+                             get_dashboard() from merakisync is called.
+
+        Returns:
+            A single VerifyResult combining results across all batches, with
+            .verified, .mismatched, .unverifiable, and .batch_errors.
+
+        Raises:
+            ValueError:   If actions is empty.
+            TimeoutError: If batches do not complete within timeout_seconds.
+        """
+        batches = cls.from_actions(
+            actions,
+            organization_id,
+            confirmed=confirmed,
+            synchronous=synchronous,
+            callback=callback,
+        )
+
+        for batch in batches:
+            batch.create(dashboard=dashboard, sleep_seconds=sleep_seconds)
+            batch.confirm(dashboard=dashboard)
+
+        cls.wait_for_all(
+            batches,
+            timeout_seconds=timeout_seconds,
+            poll_interval=poll_interval,
+            dashboard=dashboard,
+        )
+
+        per_batch = cls.verify_many(batches)
+
+        # Combine all per-batch VerifyResults into one.
+        verified: list[Action] = []
+        mismatched: list[Mismatch] = []
+        unverifiable: list[Action] = []
+        batch_errors: list[str] = []
+
+        for result in per_batch.values():
+            verified.extend(result.verified)
+            mismatched.extend(result.mismatched)
+            unverifiable.extend(result.unverifiable)
+            batch_errors.extend(result.batch_errors)
+
+        return VerifyResult(
+            verified=verified,
+            mismatched=mismatched,
+            unverifiable=unverifiable,
+            batch_errors=batch_errors,
+        )
 
 
 # ------------------------------------------------------------------
@@ -824,7 +907,7 @@ def _bulk_fetch_model(
 def _verify_actions(
     batches: list[ActionBatch],
     organization_id: str,
-) -> dict[ActionBatch, dict]:
+) -> dict[ActionBatch, VerifyResult]:
     """Core verification logic with bulk fetching.
 
     Builds one lookup per model type across all batches, then compares each
@@ -836,7 +919,7 @@ def _verify_actions(
         organization_id: The organization ID shared by all batches.
 
     Returns:
-        A dict mapping each batch to its verification result.
+        A dict mapping each batch to its VerifyResult.
     """
     # Collect all (batch, action) pairs.
     all_pairs: list[tuple[ActionBatch, Action]] = [
@@ -868,19 +951,17 @@ def _verify_actions(
         lookup[cls] = model_lookup
         failed_keys[cls] = model_failed
 
-    # Initialize per-batch result dicts.
-    results: dict[ActionBatch, dict] = {
-        batch: {"verified": [], "mismatched": [], "unverifiable": []}
-        for batch in batches
-    }
+    # Build per-batch lists, then construct VerifyResult objects at the end.
+    verified_by_batch: dict[ActionBatch, list[Action]] = {b: [] for b in batches}
+    mismatched_by_batch: dict[ActionBatch, list[Mismatch]] = {b: [] for b in batches}
+    unverifiable_by_batch: dict[ActionBatch, list[Action]] = {b: [] for b in batches}
 
     # Compare each action against the lookup.
     for batch, action in all_pairs:
-        result = results[batch]
         obj = action.source_obj
 
         if obj is None:
-            result["unverifiable"].append(action)
+            unverifiable_by_batch[batch].append(action)
             continue
 
         cls = type(obj)
@@ -888,12 +969,12 @@ def _verify_actions(
 
         if cls not in lookup:
             # Model type is not supported by the verify registry.
-            result["unverifiable"].append(action)
+            unverifiable_by_batch[batch].append(action)
             continue
 
         if pk in failed_keys.get(cls, set()):
             # The API call for this resource's fetch group failed.
-            result["unverifiable"].append(action)
+            unverifiable_by_batch[batch].append(action)
             continue
 
         current = lookup[cls].get(pk)
@@ -903,29 +984,29 @@ def _verify_actions(
             # current is None here only because the fetch succeeded but the
             # resource was not returned — confirming it no longer exists.
             if current is None:
-                result["verified"].append(action)
+                verified_by_batch[batch].append(action)
             else:
                 logger.warning(
                     "Destroy verification failed for %r — resource still exists",
                     action.resource,
                 )
-                result["mismatched"].append({
-                    "action": action,
-                    "mismatches": {
+                mismatched_by_batch[batch].append(Mismatch(
+                    action=action,
+                    mismatches={
                         "existence": {
                             "expected": "destroyed",
                             "actual": "still exists",
                         }
                     },
-                })
+                ))
             continue
 
         if current is None:
-            result["unverifiable"].append(action)
+            unverifiable_by_batch[batch].append(action)
             continue
 
         if not action.body:
-            result["verified"].append(action)
+            verified_by_batch[batch].append(action)
             continue
 
         current_meraki = current.to_meraki_dict()
@@ -939,13 +1020,23 @@ def _verify_actions(
             logger.warning(
                 "Verification failed for %r: %s", action.resource, mismatches
             )
-            result["mismatched"].append({"action": action, "mismatches": mismatches})
+            mismatched_by_batch[batch].append(Mismatch(action=action, mismatches=mismatches))
         else:
-            result["verified"].append(action)
+            verified_by_batch[batch].append(action)
 
-    total_verified = sum(len(r["verified"]) for r in results.values())
-    total_mismatched = sum(len(r["mismatched"]) for r in results.values())
-    total_unverifiable = sum(len(r["unverifiable"]) for r in results.values())
+    results = {
+        batch: VerifyResult(
+            verified=verified_by_batch[batch],
+            mismatched=mismatched_by_batch[batch],
+            unverifiable=unverifiable_by_batch[batch],
+            batch_errors=batch.errors,
+        )
+        for batch in batches
+    }
+
+    total_verified = sum(len(r.verified) for r in results.values())
+    total_mismatched = sum(len(r.mismatched) for r in results.values())
+    total_unverifiable = sum(len(r.unverifiable) for r in results.values())
     logger.info(
         "Verify complete: %d verified, %d mismatched, %d unverifiable",
         total_verified,

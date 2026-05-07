@@ -61,10 +61,11 @@ Action batches modify live production network infrastructure. Every default shou
 
 ```
 src/merakiops/
-├── __init__.py      Public re-exports: Action and ActionBatch only.
+├── __init__.py      Public re-exports: Action, ActionBatch, Mismatch, VerifyResult.
 ├── __about__.py     Version string only.
 ├── action.py        Action class. One action = one API call within a batch.
-└── action_batch.py  ActionBatch class. Submission, confirmation, status, verification.
+├── action_batch.py  ActionBatch class. Submission, confirmation, status, verification.
+└── result.py        VerifyResult and Mismatch dataclasses.
 ```
 
 ---
@@ -130,16 +131,19 @@ No raw dicts passed to callers. No API calls outside the ActionBatch methods.
 ### Method lifecycle
 
 ```
+ActionBatch.run(actions, org_id)   — full lifecycle: create → confirm → wait → verify
+                                     returns a single combined VerifyResult
+
 ActionBatch.from_actions()         — creates batch objects; splits if needed
     │
     └─► create()                   — submits to Meraki; sets self.id; sleeps 5s
     └─► confirm()                  — executes the batch (only needed if confirmed=False)
     └─► wait_until_complete()      — polls until completed/failed (async batches only)
     └─► status()                   — single poll of current batch state
-    └─► verify()                   — compares live resource state against action.body
+    └─► verify()                   — returns VerifyResult for this batch
 
 ActionBatch.wait_for_all(batches)  — polls all batches together until all finish
-ActionBatch.verify_many(batches)   — verifies all batches with minimal API calls
+ActionBatch.verify_many(batches)   — returns {batch: VerifyResult} with minimal API calls
 ```
 
 ### Async vs synchronous timing
@@ -148,18 +152,28 @@ For **async batches** (`synchronous=False`, the default), `create()` returns as 
 
 For **synchronous batches** (`synchronous=True`), `create()` blocks until all actions complete. `wait_until_complete()` and `wait_for_all()` are no-ops for these batches.
 
-### verify() and verify_many() behavior
+### VerifyResult and Mismatch
+
+All verify methods return `VerifyResult` (from `result.py`):
+- `result.verified: list[Action]`
+- `result.mismatched: list[Mismatch]` — each has `.action` and `.mismatches` (camelCase field → diff dict)
+- `result.unverifiable: list[Action]`
+- `result.batch_errors: list[str]` — Meraki execution errors from `batch.errors`
+
+`run()` returns a single combined `VerifyResult` across all batches.
+`verify_many()` returns `{batch: VerifyResult}`.
+`verify()` returns a `VerifyResult` for that batch only.
+
+### verify behavior
 
 - Uses bulk fetching: 1 API call per org (Device/Network), 1 per serial (Switchport), 1 per network (Vlan/Ssid/L3FirewallRule/DhcpServerPolicy)
-- `verify_many()` is preferred for 10+ actions — pools fetches across all batches
-- merakisync model.get() manages its own API connectivity; `verify()` accepts no `dashboard` arg
+- `verify_many()` and `run()` are preferred for 10+ actions — pools fetches across all batches
+- merakisync model.get() manages its own API connectivity; no `dashboard` arg accepted
 - Supported models: `Network`, `Device`, `Switchport`, `Vlan`, `Ssid`, `L3FirewallRule`, `DhcpServerPolicy`, `Organization`
 - Actions without `source_obj` → "unverifiable" (not an error)
 - Unsupported model types → "unverifiable" (not an error)
 - API fetch errors for a group → all actions in that group become "unverifiable"
 - Destroy operations: resource not found → "verified"; resource still exists → "mismatched"
-- `verify()` returns `{"verified": [...], "mismatched": [...], "unverifiable": [...]}`
-- `verify_many()` returns `{batch: {"verified": [...], "mismatched": [...], "unverifiable": [...]}}`
 
 ---
 

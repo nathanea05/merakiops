@@ -4,5 +4,6 @@
 
 from merakiops.action import Action
 from merakiops.action_batch import ActionBatch
+from merakiops.result import Mismatch, VerifyResult
 
-__all__ = ["Action", "ActionBatch"]
+__all__ = ["Action", "ActionBatch", "Mismatch", "VerifyResult"]

@@ -58,18 +58,12 @@ batches = ActionBatch.from_actions(
     synchronous=False,
 )
 
-# 5. Submit and confirm
-for batch in batches:
-    batch.create()     # POST to Meraki; sleeps 5s after submission
-    batch.confirm()    # queue for execution
+# 5. Submit, wait, and verify in one call
+result = ActionBatch.run(actions, organization_id="123456")
 
-# 6. Wait for Meraki to finish, then verify together
-ActionBatch.wait_for_all(batches)
-results = ActionBatch.verify_many(batches)
-for batch, result in results.items():
-    print(f"Verified:     {len(result['verified'])}")
-    print(f"Mismatched:   {len(result['mismatched'])}")
-    print(f"Unverifiable: {len(result['unverifiable'])}")
+print(f"Verified:     {len(result.verified)}")
+print(f"Mismatched:   {len(result.mismatched)}")
+print(f"Unverifiable: {len(result.unverifiable)}")
 ```
 
 ---
@@ -173,27 +167,51 @@ batch.wait_until_complete()
 batch.wait_until_complete(timeout_seconds=60, poll_interval=2.0)
 ```
 
-### `verify_many()` — check results across batches (preferred)
+### `run()` — full lifecycle in one call (recommended)
 
-Verifies multiple batches with the minimum possible API calls by pooling all actions before fetching. **Prefer this over `verify()` when sending 10 or more actions.**
+Creates batches, submits, waits, and verifies in one call. Returns a single `VerifyResult`.
+
+```python
+result = ActionBatch.run(actions, organization_id="123456")
+
+print(result)  # VerifyResult(verified=98, mismatched=1, unverifiable=0, batch_errors=1)
+
+for mismatch in result.mismatched:
+    print(mismatch.action.resource, mismatch.mismatches)
+
+# Retry pattern
+remaining = initial_actions
+for attempt in range(3):
+    result = ActionBatch.run(remaining, organization_id="123456")
+    remaining = [m.action for m in result.mismatched]
+    if not remaining:
+        break
+```
+
+### `verify_many()` — check results across batches
+
+Returns `{batch: VerifyResult}`. Preferred over `verify()` when verifying 10+ actions.
 
 ```python
 results = ActionBatch.verify_many(batches)
 for batch, result in results.items():
-    print(f"Batch {batch.id}: {len(result['verified'])} verified")
+    print(f"Batch {batch.id}: {result}")
+    for mismatch in result.mismatched:
+        print(f"  {mismatch.action.resource}: {mismatch.mismatches}")
 ```
 
 ### `verify()` — single batch
 
 ```python
-result = batch.verify()
+result = batch.verify()       # returns VerifyResult
 
-result["verified"]      # Actions where all fields matched
-result["mismatched"]    # [{"action": ..., "mismatches": {"vlan": {"expected": 200, "actual": 100}}}]
-result["unverifiable"]  # Actions that could not be verified
+result.verified               # list[Action] — all fields matched
+result.mismatched             # list[Mismatch] — use .action and .mismatches
+result.unverifiable           # list[Action] — could not be checked
+result.batch_errors           # list[str] — Meraki execution errors
 ```
 
-Both methods use bulk fetching internally:
+All verify methods use bulk fetching internally:
 
 | Model | API calls regardless of action count |
 |---|---|
