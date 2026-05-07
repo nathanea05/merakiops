@@ -372,8 +372,11 @@ class ActionBatch:
                              get_dashboard() from merakisync is called.
 
         Returns:
-            True if the batch completed without errors.
-            False if the batch failed.
+            True if the batch finished with no action-level errors.
+            False if any action in the batch failed (partial or total failure).
+            Check batch.errors for the specific failures. Changes from
+            successful actions in the same batch may still have been applied —
+            use verify() to confirm the actual state of each resource.
 
         Raises:
             RuntimeError: If the batch has not been submitted yet (id is None).
@@ -393,10 +396,10 @@ class ActionBatch:
         if self.synchronous:
             # Synchronous batches complete before create() returns.
             logger.debug("Batch %s is synchronous — already complete", self.id)
-            return not self.failed
+            return not bool(self.errors)
 
         if self.completed or self.failed:
-            return self.completed and not self.failed
+            return not bool(self.errors)
 
         logger.info(
             "Waiting for batch %s to complete (timeout=%.0fs, poll=%.1fs)",
@@ -417,12 +420,17 @@ class ActionBatch:
             time.sleep(min(poll_interval, remaining))
             self.status(dashboard=dashboard)
 
-        if self.failed:
-            logger.warning("Batch %s failed: %s", self.id, self.errors)
+        if self.errors:
+            logger.warning(
+                "Batch %s completed with %d error(s): %s",
+                self.id,
+                len(self.errors),
+                self.errors,
+            )
         else:
-            logger.info("Batch %s completed", self.id)
+            logger.info("Batch %s completed successfully", self.id)
 
-        return self.completed and not self.failed
+        return not bool(self.errors)
 
     @classmethod
     def wait_for_all(
@@ -458,7 +466,12 @@ class ActionBatch:
             dashboard:       Optional DashboardAPI instance.
 
         Returns:
-            A dict mapping each batch to True (completed) or False (failed).
+            A dict mapping each batch to True (finished with no errors) or
+            False (one or more actions failed). Meraki's failed=True means at
+            least one action failed — not that all actions failed. Changes from
+            successful actions in the same batch may still have been applied.
+            Check batch.errors for specifics and use verify_many() to confirm
+            the actual state of each resource.
 
         Raises:
             ValueError:   If batches is empty.
@@ -512,17 +525,23 @@ class ActionBatch:
             still_pending = []
             for batch in pending:
                 batch.status(dashboard=dashboard)
-                if batch.completed:
-                    logger.debug("Batch %s completed", batch.id)
-                elif batch.failed:
-                    logger.warning("Batch %s failed: %s", batch.id, batch.errors)
+                if batch.completed or batch.failed:
+                    if batch.errors:
+                        logger.warning(
+                            "Batch %s completed with %d error(s): %s",
+                            batch.id,
+                            len(batch.errors),
+                            batch.errors,
+                        )
+                    else:
+                        logger.info("Batch %s completed successfully", batch.id)
                 else:
                     still_pending.append(batch)
 
             pending = still_pending
 
         logger.info("All %d batch(es) finished", len(batches))
-        return {batch: batch.completed and not batch.failed for batch in batches}
+        return {batch: not bool(batch.errors) for batch in batches}
 
     # ------------------------------------------------------------------
     # Verification

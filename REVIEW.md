@@ -39,12 +39,15 @@ Code review checklist for changes to merakiops.
 - [ ] `wait_until_complete()` raises `RuntimeError` if `self.id` is `None`
 - [ ] `wait_until_complete()` raises `TimeoutError` (not `RuntimeError`) when deadline is exceeded
 - [ ] `wait_until_complete()` respects remaining time on the final sleep (no over-sleeping past deadline)
+- [ ] `wait_until_complete()` returns `not bool(self.errors)` — True = no errors, False = any action failed
 - [ ] `wait_for_all()` raises `ValueError` for an empty list
 - [ ] `wait_for_all()` raises `RuntimeError` if any batch is unsubmitted
 - [ ] `wait_for_all()` raises `TimeoutError` listing incomplete batch IDs
 - [ ] `wait_for_all()` continues polling remaining batches when one fails (does not stop early)
+- [ ] `wait_for_all()` treats `completed=True OR failed=True` as done — both mean Meraki finished processing
+- [ ] `wait_for_all()` logs "completed with N error(s)" for partial failures, not "failed"
 - [ ] `wait_for_all()` skips synchronous and already-completed batches in the pending list
-- [ ] `wait_for_all()` returns `{batch: bool}` for all batches, including sync and already-done ones
+- [ ] `wait_for_all()` returns `{batch: not bool(batch.errors)}` — True = no errors, False = any action failed
 
 ## _bulk_fetch_model
 
