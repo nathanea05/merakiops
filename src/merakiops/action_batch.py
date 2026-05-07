@@ -36,7 +36,11 @@ class ActionBatch:
             batch.create()
             batch.confirm()
             batch.status()
-            result = batch.verify()
+
+        # Verify all batches together with minimal API calls
+        results = ActionBatch.verify_many(batches)
+        for batch, result in results.items():
+            print(f"Batch {batch.id}: {len(result['verified'])} verified")
     """
 
     def __init__(
@@ -349,16 +353,13 @@ class ActionBatch:
     def verify(self) -> dict:
         """Compare each action's intended state against the current live state.
 
-        For each action in this batch, fetches the resource's current state
-        from the Meraki API using merakisync's model.get(source="meraki") and
-        compares it against the fields in action.body.
+        Uses bulk fetching to minimize API calls:
+          - Device and Network actions: 1 API call per organization
+          - Switchport actions: 1 API call per unique switch serial
+          - Vlan, Ssid, L3FirewallRule, DhcpServerPolicy: 1 API call per unique network
 
-        Note: Unlike create(), confirm(), and status(), this method does not
-        accept a dashboard argument. merakisync's model.get() manages its own
-        API connectivity via get_dashboard() internally.
-
-        Supported models: Network, Device, Switchport, Vlan, Ssid,
-        L3FirewallRule, DhcpServerPolicy, Organization.
+        When verifying 10 or more actions in total, prefer ActionBatch.verify_many()
+        to pool resource fetches across all batches and reduce API calls further.
 
         Returns:
             A dict with three keys:
@@ -366,119 +367,122 @@ class ActionBatch:
                 "mismatched":    list of dicts, each with keys "action" and
                                  "mismatches". mismatches maps camelCase field
                                  names to {"expected": ..., "actual": ...}.
-                "unverifiable":  list of Actions that could not be checked,
-                                 either because source_obj was not stored or
-                                 because the model type is not in the registry.
+                "unverifiable":  list of Actions that could not be checked —
+                                 source_obj not stored, model type not supported,
+                                 or an API error occurred during fetch.
+
+        Raises:
+            RuntimeError: If the batch has not been submitted yet (id is None).
         """
         if self.id is None:
             raise RuntimeError(
                 "This batch has not been submitted yet. Call create() first."
             )
 
-        results: dict = {
-            "verified": [],
-            "mismatched": [],
-            "unverifiable": [],
-        }
+        results = _verify_actions([self], self.organization_id)
+        return results[self]
 
-        logger.info("Verifying %d action(s) in batch %s", len(self.actions), self.id)
+    @classmethod
+    def verify_many(cls, batches: list[ActionBatch]) -> dict[ActionBatch, dict]:
+        """Verify multiple batches with minimal API calls.
 
-        for action in self.actions:
-            if action.source_obj is None:
-                logger.debug(
-                    "Action on resource %r has no source_obj — skipping verification",
-                    action.resource,
-                )
-                results["unverifiable"].append(action)
-                continue
+        Preferred over calling batch.verify() individually when sending 10 or
+        more actions in total. verify_many() pools all actions across batches
+        before fetching, so each resource category is fetched only once regardless
+        of how many batches reference it.
 
-            is_supported, current = _fetch_current_state(
-                action, self.organization_id
+        For example, 2000 switchport actions across 20 batches requires 1 API call
+        per unique switch serial — typically 20 calls instead of 2000.
+
+        Batches from different organizations are handled correctly: each
+        organization's resources are fetched and verified independently.
+
+        Args:
+            batches: List of ActionBatch objects to verify. All batches must
+                     have been submitted (id must not be None).
+
+        Returns:
+            A dict mapping each ActionBatch to its own result dict:
+                {
+                    batch: {
+                        "verified":     list[Action],
+                        "mismatched":   list[dict],   # {"action": ..., "mismatches": {...}}
+                        "unverifiable": list[Action],
+                    }
+                }
+
+        Raises:
+            ValueError: If batches is empty.
+            RuntimeError: If any batch has not been submitted yet.
+
+        Example:
+            results = ActionBatch.verify_many(batches)
+            for batch, result in results.items():
+                print(f"Batch {batch.id}:")
+                print(f"  Verified:     {len(result['verified'])}")
+                print(f"  Mismatched:   {len(result['mismatched'])}")
+                print(f"  Unverifiable: {len(result['unverifiable'])}")
+        """
+        if not batches:
+            raise ValueError("batches cannot be empty")
+
+        unsubmitted = [b for b in batches if b.id is None]
+        if unsubmitted:
+            raise RuntimeError(
+                f"{len(unsubmitted)} batch(es) have not been submitted yet. "
+                "Call create() on each batch before calling verify_many()."
             )
 
-            if not is_supported:
-                logger.debug(
-                    "Model type %r is not in the verify registry — skipping",
-                    type(action.source_obj).__name__,
-                )
-                results["unverifiable"].append(action)
-                continue
+        # Group by organization so each org's resources are fetched together.
+        by_org: dict[str, list[ActionBatch]] = {}
+        for batch in batches:
+            by_org.setdefault(batch.organization_id, []).append(batch)
 
-            if action.operation == "destroy":
-                if current is None:
-                    results["verified"].append(action)
-                else:
-                    logger.warning(
-                        "Destroy verification failed for %r — resource still exists",
-                        action.resource,
-                    )
-                    results["mismatched"].append({
-                        "action": action,
-                        "mismatches": {
-                            "existence": {
-                                "expected": "destroyed",
-                                "actual": "still exists",
-                            }
-                        },
-                    })
-                continue
+        combined: dict[ActionBatch, dict] = {}
+        for org_id, org_batches in by_org.items():
+            org_results = _verify_actions(org_batches, org_id)
+            combined.update(org_results)
 
-            if current is None:
-                logger.debug(
-                    "Could not fetch current state for %r — marking unverifiable",
-                    action.resource,
-                )
-                results["unverifiable"].append(action)
-                continue
-
-            if not action.body:
-                results["verified"].append(action)
-                continue
-
-            current_meraki = current.to_meraki_dict()
-            mismatches = {}
-            for api_key, expected in action.body.items():
-                actual = current_meraki.get(api_key)
-                if actual != expected:
-                    mismatches[api_key] = {"expected": expected, "actual": actual}
-
-            if mismatches:
-                logger.warning(
-                    "Verification failed for %r: %s",
-                    action.resource,
-                    mismatches,
-                )
-                results["mismatched"].append({"action": action, "mismatches": mismatches})
-            else:
-                results["verified"].append(action)
-
-        logger.info(
-            "Batch %s verify complete: %d verified, %d mismatched, %d unverifiable",
-            self.id,
-            len(results["verified"]),
-            len(results["mismatched"]),
-            len(results["unverifiable"]),
-        )
-        return results
+        return combined
 
 
 # ------------------------------------------------------------------
 # Verify helpers
 # ------------------------------------------------------------------
 
-def _fetch_current_state(
-    action: Action,
-    organization_id: str,
-) -> tuple[bool, MerakiObj | None]:
-    """Fetch the current live state of the resource referenced by an action.
+def _pk_key(obj: MerakiObj) -> tuple:
+    """Return the primary key values of a MerakiObj as a tuple.
 
-    Imports are deferred to avoid circular imports from merakisync.
+    Uses the model's __pk__ class variable so the key is always consistent
+    with how the model identifies itself.
+
+    Example:
+        Switchport(serial="Q2AB", port_id="3") → ("Q2AB", "3")
+        Vlan(network_id="N_1", vlan_id=100)    → ("N_1", 100)
+    """
+    return tuple(getattr(obj, field) for field in type(obj).__pk__)
+
+
+def _bulk_fetch_model(
+    model_cls: type,
+    source_objs: list[MerakiObj],
+    organization_id: str,
+) -> tuple[dict[tuple, MerakiObj], set[tuple]]:
+    """Fetch current state for all objects of one model type in as few API calls as possible.
+
+    Fetch granularity by model:
+      - Organization, Network, Device: one call for the entire organization
+      - Switchport:                    one call per unique serial
+      - Vlan, Ssid, L3FirewallRule,
+        DhcpServerPolicy:              one call per unique network_id
+
+    If a fetch group fails (e.g., one switch is unreachable), all source objects
+    in that group are added to failed_pk_keys so the caller can mark them
+    "unverifiable" rather than misidentifying them as mismatched.
 
     Returns:
-        (is_supported, current_obj) where:
-            is_supported=False  — model type is not in the verify registry
-            is_supported=True, obj=None  — model supported; resource not found
-            is_supported=True, obj=...   — model supported; current state retrieved
+        lookup:          PK tuple → current MerakiObj for successfully fetched resources.
+        failed_pk_keys:  PK tuples of source objects whose fetch group encountered an error.
     """
     from merakisync.models.device import Device
     from merakisync.models.dhcp_server_policy import DhcpServerPolicy
@@ -489,48 +493,266 @@ def _fetch_current_state(
     from merakisync.models.switchport import Switchport
     from merakisync.models.vlan import Vlan
 
-    obj = action.source_obj
-    cls = type(obj)
+    lookup: dict[tuple, MerakiObj] = {}
+    failed_pk_keys: set[tuple] = set()
 
-    if cls is Network:
-        results = Network.get(organization_id, source="meraki", network_id=obj.id)
-        return True, (results[0] if results else None)
+    # ---- Organization, Network, Device — one call for the whole org ----
 
-    elif cls is Device:
-        results = Device.get(organization_id, source="meraki", serial=obj.serial)
-        return True, (results[0] if results else None)
+    if model_cls is Organization:
+        try:
+            for obj in Organization.get(source="meraki"):
+                lookup[_pk_key(obj)] = obj
+        except Exception as exc:
+            logger.error("Failed to fetch organizations: %s", exc)
+            failed_pk_keys = {_pk_key(obj) for obj in source_objs}
 
-    elif cls is Switchport:
-        results = Switchport.get(obj.serial, source="meraki", port_id=obj.port_id)
-        return True, (results[0] if results else None)
+    elif model_cls is Network:
+        try:
+            for obj in Network.get(organization_id, source="meraki"):
+                lookup[_pk_key(obj)] = obj
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch networks for organization %s: %s",
+                organization_id, exc,
+            )
+            failed_pk_keys = {_pk_key(obj) for obj in source_objs}
 
-    elif cls is Vlan:
-        results = Vlan.get(obj.network_id, source="meraki", vlan_id=obj.vlan_id)
-        return True, (results[0] if results else None)
+    elif model_cls is Device:
+        try:
+            for obj in Device.get(organization_id, source="meraki"):
+                lookup[_pk_key(obj)] = obj
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch devices for organization %s: %s",
+                organization_id, exc,
+            )
+            failed_pk_keys = {_pk_key(obj) for obj in source_objs}
 
-    elif cls is Ssid:
-        results = Ssid.get(obj.network_id, source="meraki", number=obj.number)
-        return True, (results[0] if results else None)
+    # ---- Switchport — one call per unique serial ----
 
-    elif cls is L3FirewallRule:
-        # No per-rule API endpoint — fetch all rules for the network and match by position.
-        results = L3FirewallRule.get(obj.network_id, source="meraki")
-        for rule in results:
-            if rule.rule_order == obj.rule_order:
-                return True, rule
-        return True, None
+    elif model_cls is Switchport:
+        by_serial: dict[str, list[MerakiObj]] = {}
+        for obj in source_objs:
+            by_serial.setdefault(obj.serial, []).append(obj)
 
-    elif cls is DhcpServerPolicy:
-        # One policy per network — get() returns a single instance or None.
-        current = DhcpServerPolicy.get(obj.network_id, source="meraki")
-        return True, current
+        logger.debug(
+            "Fetching switchports: %d unique serial(s)", len(by_serial)
+        )
+        for serial, group in by_serial.items():
+            try:
+                for port in Switchport.get(serial, source="meraki"):
+                    lookup[_pk_key(port)] = port
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch switchports for serial %s: %s", serial, exc
+                )
+                failed_pk_keys.update(_pk_key(obj) for obj in group)
 
-    elif cls is Organization:
-        # get() returns all organizations — filter by id.
-        results = Organization.get(source="meraki")
-        for org in results:
-            if org.id == obj.id:
-                return True, org
-        return True, None
+    # ---- Vlan, Ssid, L3FirewallRule, DhcpServerPolicy — one call per network ----
 
-    return False, None
+    elif model_cls is Vlan:
+        by_network: dict[str, list[MerakiObj]] = {}
+        for obj in source_objs:
+            by_network.setdefault(obj.network_id, []).append(obj)
+
+        logger.debug("Fetching VLANs: %d unique network(s)", len(by_network))
+        for network_id, group in by_network.items():
+            try:
+                for vlan in Vlan.get(network_id, source="meraki"):
+                    lookup[_pk_key(vlan)] = vlan
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch VLANs for network %s: %s", network_id, exc
+                )
+                failed_pk_keys.update(_pk_key(obj) for obj in group)
+
+    elif model_cls is Ssid:
+        by_network = {}
+        for obj in source_objs:
+            by_network.setdefault(obj.network_id, []).append(obj)
+
+        logger.debug("Fetching SSIDs: %d unique network(s)", len(by_network))
+        for network_id, group in by_network.items():
+            try:
+                for ssid in Ssid.get(network_id, source="meraki"):
+                    lookup[_pk_key(ssid)] = ssid
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch SSIDs for network %s: %s", network_id, exc
+                )
+                failed_pk_keys.update(_pk_key(obj) for obj in group)
+
+    elif model_cls is L3FirewallRule:
+        by_network = {}
+        for obj in source_objs:
+            by_network.setdefault(obj.network_id, []).append(obj)
+
+        logger.debug(
+            "Fetching L3 firewall rules: %d unique network(s)", len(by_network)
+        )
+        for network_id, group in by_network.items():
+            try:
+                for rule in L3FirewallRule.get(network_id, source="meraki"):
+                    lookup[_pk_key(rule)] = rule
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch L3 firewall rules for network %s: %s",
+                    network_id, exc,
+                )
+                failed_pk_keys.update(_pk_key(obj) for obj in group)
+
+    elif model_cls is DhcpServerPolicy:
+        by_network = {}
+        for obj in source_objs:
+            by_network.setdefault(obj.network_id, []).append(obj)
+
+        logger.debug(
+            "Fetching DHCP server policies: %d unique network(s)", len(by_network)
+        )
+        for network_id, group in by_network.items():
+            try:
+                policy = DhcpServerPolicy.get(network_id, source="meraki")
+                if policy is not None:
+                    lookup[_pk_key(policy)] = policy
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch DHCP server policy for network %s: %s",
+                    network_id, exc,
+                )
+                failed_pk_keys.update(_pk_key(obj) for obj in group)
+
+    return lookup, failed_pk_keys
+
+
+def _verify_actions(
+    batches: list[ActionBatch],
+    organization_id: str,
+) -> dict[ActionBatch, dict]:
+    """Core verification logic with bulk fetching.
+
+    Builds one lookup per model type across all batches, then compares each
+    action against the in-memory lookup. API calls are proportional to unique
+    fetch groups (serials, network IDs, or org-level), not action count.
+
+    Args:
+        batches:         Batches to verify. All must belong to organization_id.
+        organization_id: The organization ID shared by all batches.
+
+    Returns:
+        A dict mapping each batch to its verification result.
+    """
+    # Collect all (batch, action) pairs.
+    all_pairs: list[tuple[ActionBatch, Action]] = [
+        (batch, action)
+        for batch in batches
+        for action in batch.actions
+    ]
+
+    total_actions = len(all_pairs)
+    logger.info(
+        "Verifying %d action(s) across %d batch(es) for organization %s",
+        total_actions,
+        len(batches),
+        organization_id,
+    )
+
+    # Group source objects by model type across all batches.
+    objs_by_model: dict[type, list[MerakiObj]] = {}
+    for _, action in all_pairs:
+        if action.source_obj is not None:
+            cls = type(action.source_obj)
+            objs_by_model.setdefault(cls, []).append(action.source_obj)
+
+    # Bulk fetch once per model type.
+    lookup: dict[type, dict[tuple, MerakiObj]] = {}
+    failed_keys: dict[type, set[tuple]] = {}
+    for cls, source_objs in objs_by_model.items():
+        model_lookup, model_failed = _bulk_fetch_model(cls, source_objs, organization_id)
+        lookup[cls] = model_lookup
+        failed_keys[cls] = model_failed
+
+    # Initialize per-batch result dicts.
+    results: dict[ActionBatch, dict] = {
+        batch: {"verified": [], "mismatched": [], "unverifiable": []}
+        for batch in batches
+    }
+
+    # Compare each action against the lookup.
+    for batch, action in all_pairs:
+        result = results[batch]
+        obj = action.source_obj
+
+        if obj is None:
+            result["unverifiable"].append(action)
+            continue
+
+        cls = type(obj)
+        pk = _pk_key(obj)
+
+        if cls not in lookup:
+            # Model type is not supported by the verify registry.
+            result["unverifiable"].append(action)
+            continue
+
+        if pk in failed_keys.get(cls, set()):
+            # The API call for this resource's fetch group failed.
+            result["unverifiable"].append(action)
+            continue
+
+        current = lookup[cls].get(pk)
+
+        if action.operation == "destroy":
+            # For destroys: resource not found means success.
+            # current is None here only because the fetch succeeded but the
+            # resource was not returned — confirming it no longer exists.
+            if current is None:
+                result["verified"].append(action)
+            else:
+                logger.warning(
+                    "Destroy verification failed for %r — resource still exists",
+                    action.resource,
+                )
+                result["mismatched"].append({
+                    "action": action,
+                    "mismatches": {
+                        "existence": {
+                            "expected": "destroyed",
+                            "actual": "still exists",
+                        }
+                    },
+                })
+            continue
+
+        if current is None:
+            result["unverifiable"].append(action)
+            continue
+
+        if not action.body:
+            result["verified"].append(action)
+            continue
+
+        current_meraki = current.to_meraki_dict()
+        mismatches = {}
+        for api_key, expected in action.body.items():
+            actual = current_meraki.get(api_key)
+            if actual != expected:
+                mismatches[api_key] = {"expected": expected, "actual": actual}
+
+        if mismatches:
+            logger.warning(
+                "Verification failed for %r: %s", action.resource, mismatches
+            )
+            result["mismatched"].append({"action": action, "mismatches": mismatches})
+        else:
+            result["verified"].append(action)
+
+    total_verified = sum(len(r["verified"]) for r in results.values())
+    total_mismatched = sum(len(r["mismatched"]) for r in results.values())
+    total_unverifiable = sum(len(r["unverifiable"]) for r in results.values())
+    logger.info(
+        "Verify complete: %d verified, %d mismatched, %d unverifiable",
+        total_verified,
+        total_mismatched,
+        total_unverifiable,
+    )
+    return results

@@ -58,13 +58,15 @@ batches = ActionBatch.from_actions(
     synchronous=False,
 )
 
-# 5. Submit, confirm, and verify
+# 5. Submit and confirm
 for batch in batches:
-    batch.create()            # POST to Meraki; sleeps 5s after submission
-    batch.confirm()           # queue for execution
-    batch.status()            # poll completion state
-    result = batch.verify()   # compare live resource state against intended changes
+    batch.create()     # POST to Meraki; sleeps 5s after submission
+    batch.confirm()    # queue for execution
+    batch.status()     # poll completion state
 
+# 6. Verify all batches together — minimizes API calls
+results = ActionBatch.verify_many(batches)
+for batch, result in results.items():
     print(f"Verified:     {len(result['verified'])}")
     print(f"Mismatched:   {len(result['mismatched'])}")
     print(f"Unverifiable: {len(result['unverifiable'])}")
@@ -152,9 +154,17 @@ status = batch.status()
 # {"completed": True, "failed": False, "errors": []}
 ```
 
-### verify() — check results
+### `verify_many()` — check results across batches (preferred)
 
-Fetches the current state of each resource from the Meraki API and compares it against the intended changes.
+Verifies multiple batches with the minimum possible API calls by pooling all actions before fetching. **Prefer this over `verify()` when sending 10 or more actions.**
+
+```python
+results = ActionBatch.verify_many(batches)
+for batch, result in results.items():
+    print(f"Batch {batch.id}: {len(result['verified'])} verified")
+```
+
+### `verify()` — single batch
 
 ```python
 result = batch.verify()
@@ -164,7 +174,13 @@ result["mismatched"]    # [{"action": ..., "mismatches": {"vlan": {"expected": 2
 result["unverifiable"]  # Actions that could not be verified
 ```
 
-Supported models for verify: `Network`, `Device`, `Switchport`, `Vlan`, `Ssid`, `L3FirewallRule`, `DhcpServerPolicy`, `Organization`
+Both methods use bulk fetching internally:
+
+| Model | API calls regardless of action count |
+|---|---|
+| `Device`, `Network`, `Organization` | 1 per org |
+| `Switchport` | 1 per unique serial |
+| `Vlan`, `Ssid`, `L3FirewallRule`, `DhcpServerPolicy` | 1 per unique network |
 
 ---
 

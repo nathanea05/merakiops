@@ -69,7 +69,9 @@ else:
         batch.confirm()    # queues for execution
         batch.status()     # wait for completion status
 
-        result = batch.verify()
+        # Verify all batches together — one bulk fetch per model type, not per action
+    results = ActionBatch.verify_many(batches)
+    for batch, result in results.items():
         print(f"Batch {batch.id}:")
         print(f"  Verified:     {len(result['verified'])}")
         print(f"  Mismatched:   {len(result['mismatched'])}")
@@ -161,9 +163,31 @@ for batch in batches:
 
 ---
 
-## Working with the verify() result
+## Verification
 
-`verify()` returns a dict with three lists:
+### verify_many() — preferred for 10+ actions
+
+`ActionBatch.verify_many(batches)` verifies multiple batches together with the minimum possible number of API calls. It pools all actions across every batch before fetching, so each resource category is only fetched once regardless of how many batches reference it.
+
+| Model | API calls regardless of action count |
+|---|---|
+| `Device`, `Network` | 1 per organization |
+| `Switchport` | 1 per unique switch serial |
+| `Vlan`, `Ssid`, `L3FirewallRule`, `DhcpServerPolicy` | 1 per unique network |
+
+```python
+results = ActionBatch.verify_many(batches)
+for batch, result in results.items():
+    print(f"Batch {batch.id}: {len(result['verified'])} verified, {len(result['mismatched'])} mismatched")
+```
+
+### verify() — single batch
+
+`batch.verify()` applies the same bulk-fetch logic within one batch. Use it when you only have one batch, or need per-batch results without pooling across batches.
+
+### Reading the result
+
+`verify()` and `verify_many()` both return the same result structure:
 
 ```python
 result = batch.verify()
@@ -195,23 +219,26 @@ An action is "unverifiable" (not an error) when:
 
 ## Checking batch status before verify()
 
-For asynchronous batches, the batch may still be executing when you call `status()`. You may want to poll until it completes:
+For asynchronous batches, the batch may still be executing when you call `status()`. Poll until it completes before calling verify:
 
 ```python
 import time
 
-batch.create()
-batch.confirm()
+for batch in batches:
+    batch.create()
+    batch.confirm()
 
-# Poll until the batch completes or fails
-while not batch.completed and not batch.failed:
-    time.sleep(2)
-    batch.status()
+# Poll all batches until they complete or fail
+for batch in batches:
+    while not batch.completed and not batch.failed:
+        time.sleep(2)
+        batch.status()
 
-if batch.failed:
-    print(f"Batch {batch.id} failed: {batch.errors}")
-else:
-    result = batch.verify()
+    if batch.failed:
+        print(f"Batch {batch.id} failed: {batch.errors}")
+
+# Verify all at once after all batches have completed
+results = ActionBatch.verify_many(batches)
 ```
 
 ---
@@ -231,7 +258,8 @@ batches = ActionBatch.from_actions(
 )
 for batch in batches:
     batch.create()        # blocks until batch completes
-    result = batch.verify()
+
+results = ActionBatch.verify_many(batches)
 ```
 
 ---
