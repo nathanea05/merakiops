@@ -42,29 +42,63 @@ class Action:
             )
 
     @classmethod
-    def update(cls, obj: MerakiObj) -> Action:
-        """Create an update action from a MerakiObj with changed fields.
+    def update(
+        cls,
+        obj: MerakiObj,
+        *,
+        fields_to_update: list[str] | None = None,
+    ) -> Action:
+        """Create an update action from a MerakiObj.
 
-        Only the fields that have been modified since the object was loaded
-        are included in the request body. The resource path comes from
-        obj.resource_path.
+        By default, only the fields that have been modified since the object
+        was loaded are included in the request body (tracked automatically via
+        _changed_fields).
+
+        Use fields_to_update to bypass change tracking and explicitly specify
+        which fields to include. This is useful when restoring an object to a
+        previous state retrieved from the database — the object already holds
+        the desired values but no fields have been mutated in the current
+        session, so _changed_fields would be empty.
 
         Args:
-            obj: A MerakiObj instance with one or more modified fields.
+            obj:              A MerakiObj instance.
+            fields_to_update: Optional list of snake_case field names to
+                              include in the update body. When provided,
+                              _changed_fields is ignored entirely.
+                              Example: fields_to_update=["stp_guard", "vlan"]
 
         Raises:
-            ValueError: If no fields have been changed on the object.
+            ValueError: If no fields to update are found — either because
+                        no fields were changed (default mode) or because none
+                        of the names in fields_to_update matched the model's
+                        fields (explicit mode).
 
-        Example:
+        Examples:
+            # Default: include only fields changed in this session
             port.vlan = 200
             action = Action.update(port)
+
+            # Explicit: restore specific fields from a historical record
+            old_port = Switchport.get(serial="Q2AB", source="database", ts=restore_time)[0]
+            action = Action.update(old_port, fields_to_update=["stp_guard", "vlan"])
         """
-        body = obj.to_meraki_dict(fields=list(obj._changed_fields))
+        fields = fields_to_update if fields_to_update is not None else list(obj._changed_fields)
+
+        body = obj.to_meraki_dict(fields=fields)
+
         if not body:
+            if fields_to_update is not None:
+                raise ValueError(
+                    f"None of the field names in fields_to_update matched "
+                    f"{type(obj).__name__}: {fields_to_update}. "
+                    "Use snake_case field names as defined on the model."
+                )
             raise ValueError(
                 f"{type(obj).__name__} has no changed fields. "
-                "Assign at least one new value before calling Action.update()."
+                "Assign at least one new value before calling Action.update(), "
+                "or pass fields_to_update to specify fields explicitly."
             )
+
         return cls(
             resource=obj.resource_path,
             operation="update",
