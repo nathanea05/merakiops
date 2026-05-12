@@ -92,7 +92,7 @@ class ActionBatch:
     def from_actions(
         cls,
         org_id: str,
-        actions: list[Action],
+        actions: Action | list[Action],
         *,
         confirmed: bool = False,
         synchronous: bool = False,
@@ -128,6 +128,9 @@ class ActionBatch:
                 confirmed=False,
             )
         """
+        if isinstance(actions, Action):
+            actions = [actions]
+
         if not actions:
             raise ValueError("actions cannot be empty")
 
@@ -633,7 +636,7 @@ class ActionBatch:
     @classmethod
     def run(
         cls,
-        actions: list[Action],
+        actions: Action | list[Action],
         org_id: str,
         *,
         confirmed: bool = False,
