@@ -30,7 +30,7 @@ class ActionBatch:
         actions = [Action.update(port) for port in changed_ports]
         batches = ActionBatch.from_actions(
             actions,
-            organization_id="123456",
+            org_id="123456",
             confirmed=False,
         )
         for batch in batches:
@@ -46,14 +46,14 @@ class ActionBatch:
 
     def __init__(
         self,
-        organization_id: str,
+        org_id: str,
         actions: list[Action],
         *,
         confirmed: bool = False,
         synchronous: bool = False,
         callback: dict | None = None,
     ) -> None:
-        self.organization_id = organization_id
+        self.org_id = org_id
         self.actions = actions
         self.confirmed = confirmed
         self.synchronous = synchronous
@@ -77,7 +77,7 @@ class ActionBatch:
             status = f"submitted id={self.id!r}"
         return (
             f"ActionBatch("
-            f"organization_id={self.organization_id!r}, "
+            f"org_id={self.org_id!r}, "
             f"actions={len(self.actions)}, "
             f"synchronous={self.synchronous}, "
             f"confirmed={self.confirmed}, "
@@ -91,8 +91,8 @@ class ActionBatch:
     @classmethod
     def from_actions(
         cls,
+        org_id: str,
         actions: list[Action],
-        organization_id: str,
         *,
         confirmed: bool = False,
         synchronous: bool = False,
@@ -106,7 +106,7 @@ class ActionBatch:
 
         Args:
             actions:         List of Action objects to batch. Must not be empty.
-            organization_id: Meraki organization ID that owns these resources.
+            org_id: Meraki organization ID that owns these resources.
             confirmed:       Whether batches are confirmed immediately on create().
                              Default False — batches do not execute until confirm()
                              is called.
@@ -124,7 +124,7 @@ class ActionBatch:
         Example:
             batches = ActionBatch.from_actions(
                 actions,
-                organization_id="123456",
+                org_id="123456",
                 confirmed=False,
             )
         """
@@ -138,7 +138,7 @@ class ActionBatch:
             chunk = actions[i : i + batch_size]
             batches.append(
                 cls(
-                    organization_id=organization_id,
+                    org_id=org_id,
                     actions=chunk,
                     confirmed=confirmed,
                     synchronous=synchronous,
@@ -150,7 +150,7 @@ class ActionBatch:
             "Created %d batch(es) from %d action(s) for organization %s",
             len(batches),
             len(actions),
-            organization_id,
+            org_id,
         )
         return batches
 
@@ -200,20 +200,20 @@ class ActionBatch:
             "Submitting action batch of %d action(s) to organization %s "
             "(confirmed=%s, synchronous=%s)",
             len(self.actions),
-            self.organization_id,
+            self.org_id,
             self.confirmed,
             self.synchronous,
         )
 
         try:
             response = dashboard.organizations.createOrganizationActionBatch(
-                self.organization_id,
+                self.org_id,
                 **payload,
             )
         except Exception as exc:
             logger.error(
                 "Failed to submit action batch to organization %s: %s",
-                self.organization_id,
+                self.org_id,
                 exc,
             )
             raise
@@ -265,7 +265,7 @@ class ActionBatch:
 
         try:
             response = dashboard.organizations.updateOrganizationActionBatch(
-                self.organization_id,
+                self.org_id,
                 self.id,
                 confirmed=True,
             )
@@ -273,7 +273,7 @@ class ActionBatch:
             logger.error(
                 "Failed to confirm batch %s for organization %s: %s",
                 self.id,
-                self.organization_id,
+                self.org_id,
                 exc,
             )
             raise
@@ -322,7 +322,7 @@ class ActionBatch:
 
         try:
             response = dashboard.organizations.getOrganizationActionBatch(
-                self.organization_id,
+                self.org_id,
                 self.id,
             )
         except Exception as exc:
@@ -571,7 +571,7 @@ class ActionBatch:
                 "This batch has not been submitted yet. Call create() first."
             )
 
-        results = _verify_actions([self], self.organization_id)
+        results = _verify_actions([self], self.org_id)
         return results[self]
 
     @classmethod
@@ -621,7 +621,7 @@ class ActionBatch:
         # Group by organization so each org's resources are fetched together.
         by_org: dict[str, list[ActionBatch]] = {}
         for batch in batches:
-            by_org.setdefault(batch.organization_id, []).append(batch)
+            by_org.setdefault(batch.org_id, []).append(batch)
 
         combined: dict[ActionBatch, VerifyResult] = {}
         for org_id, org_batches in by_org.items():
@@ -634,7 +634,7 @@ class ActionBatch:
     def run(
         cls,
         actions: list[Action],
-        organization_id: str,
+        org_id: str,
         *,
         confirmed: bool = False,
         synchronous: bool = False,
@@ -655,14 +655,14 @@ class ActionBatch:
 
             remaining = initial_actions
             for attempt in range(max_retries):
-                result = ActionBatch.run(remaining, organization_id=org.id)
+                result = ActionBatch.run(remaining, org_id=org.id)
                 remaining = [m.action for m in result.mismatched]
                 if not remaining:
                     break
 
         Args:
             actions:         List of Action objects to submit. Must not be empty.
-            organization_id: Meraki organization ID that owns these resources.
+            org_id: Meraki organization ID that owns these resources.
             confirmed:       Whether batches execute immediately on create().
                              Default False — confirm() is called automatically
                              after create() regardless of this setting.
@@ -687,7 +687,7 @@ class ActionBatch:
         """
         batches = cls.from_actions(
             actions,
-            organization_id,
+            org_id,
             confirmed=confirmed,
             synchronous=synchronous,
             callback=callback,
@@ -746,7 +746,7 @@ def _pk_key(obj: MerakiObj) -> tuple:
 def _bulk_fetch_model(
     model_cls: type,
     source_objs: list[MerakiObj],
-    organization_id: str,
+    org_id: str,
 ) -> tuple[dict[tuple, MerakiObj], set[tuple]]:
     """Fetch current state for all objects of one model type in as few API calls as possible.
 
@@ -788,23 +788,23 @@ def _bulk_fetch_model(
 
     elif model_cls is Network:
         try:
-            for obj in Network.get(organization_id, source="meraki"):
+            for obj in Network.get(org_id, source="meraki"):
                 lookup[_pk_key(obj)] = obj
         except Exception as exc:
             logger.error(
                 "Failed to fetch networks for organization %s: %s",
-                organization_id, exc,
+                org_id, exc,
             )
             failed_pk_keys = {_pk_key(obj) for obj in source_objs}
 
     elif model_cls is Device:
         try:
-            for obj in Device.get(organization_id, source="meraki"):
+            for obj in Device.get(org_id, source="meraki"):
                 lookup[_pk_key(obj)] = obj
         except Exception as exc:
             logger.error(
                 "Failed to fetch devices for organization %s: %s",
-                organization_id, exc,
+                org_id, exc,
             )
             failed_pk_keys = {_pk_key(obj) for obj in source_objs}
 
@@ -906,7 +906,7 @@ def _bulk_fetch_model(
 
 def _verify_actions(
     batches: list[ActionBatch],
-    organization_id: str,
+    org_id: str,
 ) -> dict[ActionBatch, VerifyResult]:
     """Core verification logic with bulk fetching.
 
@@ -915,8 +915,8 @@ def _verify_actions(
     fetch groups (serials, network IDs, or org-level), not action count.
 
     Args:
-        batches:         Batches to verify. All must belong to organization_id.
-        organization_id: The organization ID shared by all batches.
+        batches:         Batches to verify. All must belong to org_id.
+        org_id: The organization ID shared by all batches.
 
     Returns:
         A dict mapping each batch to its VerifyResult.
@@ -933,7 +933,7 @@ def _verify_actions(
         "Verifying %d action(s) across %d batch(es) for organization %s",
         total_actions,
         len(batches),
-        organization_id,
+        org_id,
     )
 
     # Group source objects by model type across all batches.
@@ -947,7 +947,7 @@ def _verify_actions(
     lookup: dict[type, dict[tuple, MerakiObj]] = {}
     failed_keys: dict[type, set[tuple]] = {}
     for cls, source_objs in objs_by_model.items():
-        model_lookup, model_failed = _bulk_fetch_model(cls, source_objs, organization_id)
+        model_lookup, model_failed = _bulk_fetch_model(cls, source_objs, org_id)
         lookup[cls] = model_lookup
         failed_keys[cls] = model_failed
 

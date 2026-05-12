@@ -53,13 +53,13 @@ actions = [Action.update(port) for port in ports if port._changed_fields]
 # 4. Build batches — automatically split at 100 actions each
 batches = ActionBatch.from_actions(
     actions,
-    organization_id="123456",
+    org_id="123456",
     confirmed=False,     # does not execute until confirm() is called
     synchronous=False,
 )
 
 # 5. Submit, wait, and verify in one call
-result = ActionBatch.run(actions, organization_id="123456")
+result = ActionBatch.run(actions, org_id="123456")
 
 print(f"Verified:     {len(result.verified)}")
 print(f"Mismatched:   {len(result.mismatched)}")
@@ -114,7 +114,7 @@ Splits your actions into batches that respect Meraki's limits automatically.
 ```python
 batches = ActionBatch.from_actions(
     actions,
-    organization_id="123456",
+    org_id="123456",
     confirmed=False,      # default — batches do not execute until confirm()
     synchronous=False,    # default — async execution
     callback=None,        # optional Meraki webhook callback config
@@ -172,7 +172,7 @@ batch.wait_until_complete(timeout_seconds=60, poll_interval=2.0)
 Creates batches, submits, waits, and verifies in one call. Returns a single `VerifyResult`.
 
 ```python
-result = ActionBatch.run(actions, organization_id="123456")
+result = ActionBatch.run(actions, org_id="123456")
 
 print(result)  # VerifyResult(verified=98, mismatched=1, unverifiable=0, batch_errors=1)
 
@@ -182,7 +182,7 @@ for mismatch in result.mismatched:
 # Retry pattern
 remaining = initial_actions
 for attempt in range(3):
-    result = ActionBatch.run(remaining, organization_id="123456")
+    result = ActionBatch.run(remaining, org_id="123456")
     remaining = [m.action for m in result.mismatched]
     if not remaining:
         break

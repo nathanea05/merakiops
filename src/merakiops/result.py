@@ -50,7 +50,7 @@ class VerifyResult:
                        actions, independent of the field-level comparison above.
 
     Example:
-        result = ActionBatch.run(actions, organization_id="123456")
+        result = ActionBatch.run(actions, org_id="123456")
 
         print(f"Verified:     {len(result.verified)}")
         print(f"Mismatched:   {len(result.mismatched)}")
