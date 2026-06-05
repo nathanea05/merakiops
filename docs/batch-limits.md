@@ -19,14 +19,14 @@ This document explains the limits Meraki enforces on action batches and how mera
 
 ```python
 # 250 actions, async — produces 3 batches: [100, 100, 50]
-batches = ActionBatch.from_actions(actions, org_id="123456")
+batches = ActionBatch.from_actions("123456", actions)
 
 # 50 actions, synchronous — produces 3 batches: [20, 20, 10]
 batches = ActionBatch.from_actions(
+    "123456",
     actions,
-    org_id="123456",
     synchronous=True,
-    confirmed=True,  # synchronous batches must be confirmed immediately
+    confirmed=True,  # required by Meraki for synchronous batches
 )
 ```
 
@@ -56,7 +56,7 @@ batches = ActionBatch.from_actions(
 Meraki's API has rate limits. `create()` sleeps for 5 seconds after each batch submission by default to avoid hitting these limits when looping over many batches.
 
 ```python
-# Default: sleep 5 seconds between batches
+# Default: sleep 5 seconds after each submission
 for batch in batches:
     batch.create()
 
@@ -79,14 +79,14 @@ When `confirmed=True`, the batch is queued for execution immediately on `create(
 
 ```python
 # Safe workflow: preview first
-batches = ActionBatch.from_actions(actions, org_id="123456", confirmed=False)
+batches = ActionBatch.from_actions("123456", actions, confirmed=False)
 for batch in batches:
     batch.create()    # batch exists in Meraki but does not run yet
     # ... review batch.id, inspect actions ...
     batch.confirm()   # now it runs
 
 # Immediate workflow: execute on create()
-batches = ActionBatch.from_actions(actions, org_id="123456", confirmed=True)
+batches = ActionBatch.from_actions("123456", actions, confirmed=True)
 for batch in batches:
     batch.create()    # executes immediately
 ```

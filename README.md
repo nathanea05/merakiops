@@ -14,7 +14,12 @@ Built on top of [merakisync](https://github.com/nathanea05/merakisync), merakiop
 merakiops provides two classes:
 
 - **`Action`** — wraps a single Meraki API change (update, create, or destroy) on a typed `merakisync` model object.
-- **`ActionBatch`** — groups Actions into Meraki API action batches, handles the 100-action limit automatically, submits them to Meraki, and verifies the results.
+- **`ActionBatch`** — groups Actions into Meraki API action batches, handles splitting automatically, submits them to Meraki, waits for completion, and verifies the results.
+
+It also provides two result types:
+
+- **`VerifyResult`** — the outcome of a verify operation: verified, mismatched, unverifiable, and batch errors.
+- **`Mismatch`** — a single action whose live state did not match what was intended.
 
 ---
 
@@ -50,16 +55,8 @@ for port in ports:
 # 3. Create Actions from the changed objects
 actions = [Action.update(port) for port in ports if port._changed_fields]
 
-# 4. Build batches — automatically split at 100 actions each
-batches = ActionBatch.from_actions(
-    actions,
-    org_id="123456",
-    confirmed=False,     # does not execute until confirm() is called
-    synchronous=False,
-)
-
-# 5. Submit, wait, and verify in one call
-result = ActionBatch.run(actions, org_id="123456")
+# 4. Submit, wait, and verify — all in one call
+result = ActionBatch.run("123456", actions)
 
 print(f"Verified:     {len(result.verified)}")
 print(f"Mismatched:   {len(result.mismatched)}")
@@ -70,11 +67,11 @@ print(f"Unverifiable: {len(result.unverifiable)}")
 
 ## Actions
 
-Each `Action` corresponds to a single API call within a batch. Always use the factory classmethods.
+Each `Action` corresponds to a single API call within a batch. Always use the factory classmethods — never instantiate `Action` directly.
 
 ### update — modify an existing resource
 
-Only the fields that changed are included in the request body.
+Only the fields that changed are included in the request body. Change tracking is automatic via `_changed_fields`.
 
 ```python
 from merakiops import Action
@@ -84,9 +81,18 @@ port.name = "uplink"
 action = Action.update(port)
 ```
 
+Use `fields_to_update` to explicitly specify fields instead of relying on change tracking. This is useful when restoring an object from a historical database record — the object holds the desired values but no fields have been mutated in the current session.
+
+```python
+old_port = Switchport.get(serial="Q2AB", source="database", ts=restore_time)[0]
+action = Action.update(old_port, fields_to_update=["stp_guard", "vlan"])
+```
+
+`Action.update()` raises `ValueError` if there are no fields to include in the body.
+
 ### create — add a new resource
 
-All fields from the object are included. The request goes to the collection endpoint.
+All fields from the object are included. The request goes to the collection endpoint (derived automatically by stripping the last path segment from `obj.resource_path`).
 
 ```python
 from merakisync.models.vlan import Vlan
@@ -95,9 +101,11 @@ new_vlan = Vlan(network_id="N_123", vlan_id=200, name="Finance", ...)
 action = Action.create(new_vlan)
 ```
 
+`L3FirewallRule` and `DhcpServerPolicy` do not support create — use `Action.update()` for both.
+
 ### destroy — delete a resource
 
-No body is sent. The resource is identified by its path.
+No body is sent. The resource is identified by its path alone.
 
 ```python
 action = Action.destroy(old_vlan)
@@ -113,8 +121,8 @@ Splits your actions into batches that respect Meraki's limits automatically.
 
 ```python
 batches = ActionBatch.from_actions(
+    "123456",
     actions,
-    org_id="123456",
     confirmed=False,      # default — batches do not execute until confirm()
     synchronous=False,    # default — async execution
     callback=None,        # optional Meraki webhook callback config
@@ -126,12 +134,18 @@ batches = ActionBatch.from_actions(
 | Asynchronous (`synchronous=False`) | 100 |
 | Synchronous (`synchronous=True`) | 20 |
 
+`from_actions()` raises `ValueError` if `actions` is empty.
+
 ### create() — submit to Meraki
 
+Submits the batch to the Meraki API and populates `batch.id`. Sleeps 5 seconds after submission by default to avoid rate limiting when looping over many batches.
+
 ```python
-batch.create()                  # sleeps 5 seconds after submission by default
-batch.create(sleep_seconds=0)   # disable throttling
+batch.create()                  # sleeps 5 seconds after submission
+batch.create(sleep_seconds=0)   # disable sleep
 ```
+
+Raises `RuntimeError` if the batch has already been submitted.
 
 ### confirm() — execute the batch
 
@@ -141,48 +155,63 @@ Only needed when the batch was created with `confirmed=False`.
 batch.confirm()
 ```
 
+Has no effect if the batch is already confirmed. Raises `RuntimeError` if the batch has not been submitted yet.
+
 ### status() — check completion
+
+Fetches the current status from Meraki and updates `batch.completed`, `batch.failed`, and `batch.errors`.
 
 ```python
 status = batch.status()
 # {"completed": True, "failed": False, "errors": []}
 ```
 
-### `wait_for_all()` — wait for async batches to finish
-
-For async batches, call this before `verify_many()`. `create()` returns immediately after Meraki accepts the batch — changes are not applied until the batch finishes executing.
-
-```python
-ActionBatch.wait_for_all(batches)                              # default 120s timeout
-ActionBatch.wait_for_all(batches, timeout_seconds=300)         # custom timeout
-ActionBatch.wait_for_all(batches, poll_interval=5.0)           # custom poll interval
-```
-
-Returns `{batch: bool}` — `True` if completed, `False` if failed.
+Raises `RuntimeError` if the batch has not been submitted yet.
 
 ### `wait_until_complete()` — wait for a single batch
+
+For async batches, `create()` returns immediately after Meraki accepts the batch — changes are not applied yet. Call `wait_until_complete()` before `verify()` to avoid comparing against pre-change state.
 
 ```python
 batch.wait_until_complete()
 batch.wait_until_complete(timeout_seconds=60, poll_interval=2.0)
 ```
 
-### `run()` — full lifecycle in one call (recommended)
+Returns `True` if no action errors, `False` if any action failed. Raises `TimeoutError` if the batch does not finish within `timeout_seconds`. No-op for synchronous batches.
 
-Creates batches, submits, waits, and verifies in one call. Returns a single `VerifyResult`.
+### `wait_for_all()` — wait for multiple batches together
+
+Polls all pending batches each interval and removes them from the wait list as they finish. Preferred over calling `wait_until_complete()` individually when working with multiple batches.
 
 ```python
-result = ActionBatch.run(actions, org_id="123456")
+ActionBatch.wait_for_all(batches)                              # default 120s timeout
+ActionBatch.wait_for_all(batches, timeout_seconds=300)
+ActionBatch.wait_for_all(batches, poll_interval=5.0)
+```
+
+Returns `{batch: bool}` — `True` if completed with no errors, `False` if any action failed. Synchronous batches are skipped (they complete before `create()` returns).
+
+### `run()` — full lifecycle in one call (recommended)
+
+Creates batches, submits, confirms, waits, and verifies in one call. Returns a single `VerifyResult` combining all batches.
+
+```python
+result = ActionBatch.run("123456", actions)
 
 print(result)  # VerifyResult(verified=98, mismatched=1, unverifiable=0, batch_errors=1)
 
 for mismatch in result.mismatched:
     print(mismatch.action.resource, mismatch.mismatches)
+```
 
-# Retry pattern
+`run()` always calls `confirm()` after `create()` regardless of the `confirmed` setting, so batches will always execute.
+
+**Retry pattern:**
+
+```python
 remaining = initial_actions
 for attempt in range(3):
-    result = ActionBatch.run(remaining, org_id="123456")
+    result = ActionBatch.run("123456", remaining)
     remaining = [m.action for m in result.mismatched]
     if not remaining:
         break
@@ -190,7 +219,7 @@ for attempt in range(3):
 
 ### `verify_many()` — check results across batches
 
-Returns `{batch: VerifyResult}`. Preferred over `verify()` when verifying 10+ actions.
+Returns `{batch: VerifyResult}`. Preferred over `verify()` when verifying 10+ actions — pools resource fetches across all batches to minimize API calls.
 
 ```python
 results = ActionBatch.verify_many(batches)
@@ -199,6 +228,8 @@ for batch, result in results.items():
     for mismatch in result.mismatched:
         print(f"  {mismatch.action.resource}: {mismatch.mismatches}")
 ```
+
+Raises `ValueError` if `batches` is empty, `RuntimeError` if any batch has not been submitted.
 
 ### `verify()` — single batch
 
@@ -211,6 +242,8 @@ result.unverifiable           # list[Action] — could not be checked
 result.batch_errors           # list[str] — Meraki execution errors
 ```
 
+Raises `RuntimeError` if the batch has not been submitted yet.
+
 All verify methods use bulk fetching internally:
 
 | Model | API calls regardless of action count |
@@ -221,16 +254,103 @@ All verify methods use bulk fetching internally:
 
 ---
 
-## Batch limits
+## VerifyResult
 
-Meraki enforces the following limits on action batches:
+All verify methods return a `VerifyResult`:
+
+```python
+result.verified      # list[Action]   — all body fields matched live state
+result.mismatched    # list[Mismatch] — one or more fields did not match
+result.unverifiable  # list[Action]   — could not be checked (see below)
+result.batch_errors  # list[str]      — Meraki execution errors from batch.errors
+```
+
+Each `Mismatch` has `.action` and `.mismatches`:
+
+```python
+for mismatch in result.mismatched:
+    print(mismatch.action.resource)
+    for field, diff in mismatch.mismatches.items():
+        print(f"  {field}: expected {diff['expected']!r}, got {diff['actual']!r}")
+```
+
+**Unverifiable** means the action could not be checked — not that it failed. An action is unverifiable when:
+- `source_obj` was not stored on the Action
+- The model type is not in the verify registry
+- An API error occurred while fetching the resource group
+
+**`batch_errors`** are error strings returned by Meraki for actions that failed during batch execution. These come from `batch.errors` and are independent of the field-level comparison in `mismatched`.
+
+---
+
+## Manual lifecycle
+
+For cases where you need per-batch control or visibility:
+
+```python
+batches = ActionBatch.from_actions("123456", actions)
+
+for batch in batches:
+    batch.create()     # submit; sleeps 5s by default
+    batch.confirm()    # queue for execution
+
+ActionBatch.wait_for_all(batches)        # poll until all finish
+results = ActionBatch.verify_many(batches)
+
+for batch, result in results.items():
+    print(f"Batch {batch.id}: {result}")
+    if result.batch_errors:
+        print("  Errors:", result.batch_errors)
+    for mismatch in result.mismatched:
+        print(f"  {mismatch.action.resource}: {mismatch.mismatches}")
+```
+
+---
+
+## Synchronous batches
+
+For small sets of changes where you need the batch to complete before continuing. Meraki requires `confirmed=True` for synchronous batches.
+
+```python
+result = ActionBatch.run(
+    "123456",
+    actions,
+    confirmed=True,       # required by Meraki for synchronous batches
+    synchronous=True,     # up to 20 actions per batch; from_actions() splits automatically
+)
+```
+
+`wait_for_all()` and `wait_until_complete()` are no-ops for synchronous batches — `create()` blocks until all actions complete.
+
+---
+
+## Supported models
+
+The following merakisync models are supported in all verify methods:
+
+| Model | Notes |
+|---|---|
+| `Network` | Fetched org-wide; 1 API call |
+| `Device` | Fetched org-wide; 1 API call |
+| `Organization` | Fetched globally; 1 API call |
+| `Switchport` | 1 API call per unique switch serial |
+| `Vlan` | 1 API call per unique network |
+| `Ssid` | 1 API call per unique network |
+| `L3FirewallRule` | 1 API call per unique network |
+| `DhcpServerPolicy` | 1 API call per unique network |
+
+Actions for unsupported model types are reported as `unverifiable` — not as errors.
+
+---
+
+## Batch limits
 
 | Limit | Value |
 |---|---|
 | Max actions per async batch | 100 |
 | Max actions per synchronous batch | 20 |
 
-`ActionBatch.from_actions()` handles splitting automatically. If you pass 250 actions, you get 3 batches (100, 100, 50). You never need to count or split manually.
+`ActionBatch.from_actions()` handles splitting automatically. If you pass 250 async actions, you get 3 batches (100, 100, 50). You never need to count or split manually.
 
 See [docs/batch-limits.md](docs/batch-limits.md) for more detail.
 
@@ -242,6 +362,7 @@ See [docs/usage.md](docs/usage.md) for complete examples including:
 - Updating switchport configurations across many devices
 - Creating and destroying VLANs
 - Verifying changes and handling mismatches
+- Retry patterns for mismatched actions
 - Working with synchronous batches
 
 ---

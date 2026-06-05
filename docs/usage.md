@@ -76,7 +76,7 @@ if not actions:
     print("No changes to apply.")
 else:
     # 4. Submit, wait, and verify in one call
-    result = ActionBatch.run(actions, org_id="123456")
+    result = ActionBatch.run("123456", actions)
 
     print(f"Verified:     {len(result.verified)}")
     print(f"Mismatched:   {len(result.mismatched)}")
@@ -109,7 +109,7 @@ for network_id in network_ids:
     )
     actions.append(Action.create(new_vlan))
 
-result = ActionBatch.run(actions, org_id="123456")
+result = ActionBatch.run("123456", actions)
 print(result)
 ```
 
@@ -127,7 +127,7 @@ vlans_to_remove = Vlan.get(network_id="N_abc", source="database", vlan_id=999)
 actions = [Action.destroy(vlan) for vlan in vlans_to_remove]
 
 if actions:
-    result = ActionBatch.run(actions, org_id="123456")
+    result = ActionBatch.run("123456", actions)
     # For destroy operations, verify() checks that the resource no longer exists.
     print(f"Destroyed and verified: {len(result.verified)}")
 ```
@@ -148,7 +148,7 @@ for net in networks:
     net.notes = "Managed by merakiops"
 
 actions = [Action.update(net) for net in networks if net._changed_fields]
-result = ActionBatch.run(actions, org_id="123456")
+result = ActionBatch.run("123456", actions)
 print(result)
 ```
 
@@ -165,7 +165,7 @@ remaining = initial_actions
 max_retries = 3
 
 for attempt in range(max_retries):
-    result = ActionBatch.run(remaining, org_id="123456")
+    result = ActionBatch.run("123456", remaining)
 
     print(f"Attempt {attempt + 1}: {len(result.verified)} verified, {len(result.mismatched)} mismatched")
 
@@ -188,8 +188,8 @@ else:
 
 ```python
 result = ActionBatch.run(
+    "123456",
     actions,
-    org_id="123456",
     confirmed=False,       # default
     synchronous=False,     # default
     timeout_seconds=120,   # default
@@ -267,9 +267,9 @@ For small sets of changes that must complete before continuing:
 ```python
 # Maximum 20 actions per batch. from_actions() splits automatically.
 result = ActionBatch.run(
+    "123456",
     actions,
-    org_id="123456",
-    confirmed=True,       # must be True for synchronous
+    confirmed=True,       # required by Meraki for synchronous batches
     synchronous=True,
 )
 ```

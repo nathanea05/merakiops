@@ -29,8 +29,8 @@ class ActionBatch:
     Example:
         actions = [Action.update(port) for port in changed_ports]
         batches = ActionBatch.from_actions(
+            "123456",
             actions,
-            org_id="123456",
             confirmed=False,
         )
         for batch in batches:
@@ -41,7 +41,7 @@ class ActionBatch:
         # Verify all batches together with minimal API calls
         results = ActionBatch.verify_many(batches)
         for batch, result in results.items():
-            print(f"Batch {batch.id}: {len(result['verified'])} verified")
+            print(f"Batch {batch.id}: {len(result.verified)} verified")
     """
 
     def __init__(
@@ -105,14 +105,15 @@ class ActionBatch:
           - Synchronous batches (synchronous=True):   up to 20 actions each
 
         Args:
+            org_id:          Meraki organization ID that owns these resources.
             actions:         List of Action objects to batch. Must not be empty.
-            org_id: Meraki organization ID that owns these resources.
             confirmed:       Whether batches are confirmed immediately on create().
                              Default False — batches do not execute until confirm()
                              is called.
             synchronous:     Whether Meraki should execute the batch synchronously
                              (API call blocks until complete). Default False.
                              Synchronous batches are limited to 20 actions.
+                             Meraki requires confirmed=True for synchronous batches.
             callback:        Optional Meraki webhook callback config dict.
 
         Returns:
@@ -120,11 +121,12 @@ class ActionBatch:
 
         Raises:
             ValueError: If actions is empty.
+            ValueError: If synchronous=True and confirmed=False.
 
         Example:
             batches = ActionBatch.from_actions(
+                "123456",
                 actions,
-                org_id="123456",
                 confirmed=False,
             )
         """
@@ -133,6 +135,13 @@ class ActionBatch:
 
         if not actions:
             raise ValueError("actions cannot be empty")
+
+        if synchronous and not confirmed:
+            raise ValueError(
+                "Meraki requires confirmed=True for synchronous batches. "
+                "Pass confirmed=True to from_actions(), or use synchronous=False "
+                "for asynchronous execution."
+            )
 
         batch_size = MAX_SYNCHRONOUS_ACTIONS if synchronous else MAX_ACTIONS_PER_BATCH
 
@@ -636,8 +645,8 @@ class ActionBatch:
     @classmethod
     def run(
         cls,
-        actions: Action | list[Action],
         org_id: str,
+        actions: Action | list[Action],
         *,
         confirmed: bool = False,
         synchronous: bool = False,
@@ -658,17 +667,18 @@ class ActionBatch:
 
             remaining = initial_actions
             for attempt in range(max_retries):
-                result = ActionBatch.run(remaining, org_id=org.id)
+                result = ActionBatch.run(org_id, remaining)
                 remaining = [m.action for m in result.mismatched]
                 if not remaining:
                     break
 
         Args:
+            org_id:          Meraki organization ID that owns these resources.
             actions:         List of Action objects to submit. Must not be empty.
-            org_id: Meraki organization ID that owns these resources.
             confirmed:       Whether batches execute immediately on create().
                              Default False — confirm() is called automatically
                              after create() regardless of this setting.
+                             Must be True when synchronous=True.
             synchronous:     Whether Meraki executes the batch synchronously.
                              Default False.
             callback:        Optional Meraki webhook callback config dict.
@@ -685,12 +695,12 @@ class ActionBatch:
             .verified, .mismatched, .unverifiable, and .batch_errors.
 
         Raises:
-            ValueError:   If actions is empty.
+            ValueError:   If actions is empty, or synchronous=True and confirmed=False.
             TimeoutError: If batches do not complete within timeout_seconds.
         """
         batches = cls.from_actions(
-            actions,
             org_id,
+            actions,
             confirmed=confirmed,
             synchronous=synchronous,
             callback=callback,
@@ -850,7 +860,7 @@ def _bulk_fetch_model(
                 failed_pk_keys.update(_pk_key(obj) for obj in group)
 
     elif model_cls is Ssid:
-        by_network = {}
+        by_network: dict[str, list[MerakiObj]] = {}
         for obj in source_objs:
             by_network.setdefault(obj.network_id, []).append(obj)
 
@@ -866,7 +876,7 @@ def _bulk_fetch_model(
                 failed_pk_keys.update(_pk_key(obj) for obj in group)
 
     elif model_cls is L3FirewallRule:
-        by_network = {}
+        by_network: dict[str, list[MerakiObj]] = {}
         for obj in source_objs:
             by_network.setdefault(obj.network_id, []).append(obj)
 
@@ -885,7 +895,7 @@ def _bulk_fetch_model(
                 failed_pk_keys.update(_pk_key(obj) for obj in group)
 
     elif model_cls is DhcpServerPolicy:
-        by_network = {}
+        by_network: dict[str, list[MerakiObj]] = {}
         for obj in source_objs:
             by_network.setdefault(obj.network_id, []).append(obj)
 

@@ -79,7 +79,7 @@ MerakiObj (from merakisync)
       Action.create(obj)        # all fields, collection path
       Action.destroy(obj)       # no body, single-resource path
             │
-            └─► ActionBatch.from_actions(actions, org_id)
+            └─► ActionBatch.from_actions(org_id, actions)
                       │
                       └─► batch.create()     # POST /organizations/{id}/actionBatches
                           batch.confirm()    # PUT  /organizations/{id}/actionBatches/{id}
@@ -131,7 +131,7 @@ No raw dicts passed to callers. No API calls outside the ActionBatch methods.
 ### Method lifecycle
 
 ```
-ActionBatch.run(actions, org_id)   — full lifecycle: create → confirm → wait → verify
+ActionBatch.run(org_id, actions)   — full lifecycle: create → confirm → wait → verify
                                      returns a single combined VerifyResult
 
 ActionBatch.from_actions()         — creates batch objects; splits if needed
@@ -217,12 +217,14 @@ When merakisync adds a new model that supports action batch operations:
 
 ## Before writing code
 
-Always:
-1. Explain what you plan to change and why.
-2. Identify any risks or places where existing behavior could break.
-3. Call out anything unclear before starting.
-4. Check existing patterns in both merakiops and merakisync before inventing new ones.
-5. Confirm alignment with the developer before making any changes.
+Always, without exception:
+
+1. **State your reasoning** — explain why the change is needed, what problem it solves, and what alternatives you considered and rejected. Do not skip this even for small changes.
+2. **State your assumptions** — call out anything you are inferring about merakisync behavior, Meraki API behavior, or existing code contracts. If something is unclear, say so explicitly before starting.
+3. **Write an implementation plan** — list the specific files and lines you intend to touch, in order. For any change that affects a public method signature, also list the docstring, README, and docs/usage.md sections that need updating.
+4. **Identify risks** — call out any existing behavior that could break, any edge cases the change introduces, and any callers that depend on the current behavior.
+5. **Check existing patterns** — read the relevant code in both merakiops and merakisync before proposing anything new. Do not invent abstractions that already exist.
+6. **Confirm alignment** — wait for explicit approval before making any code changes.
 
 ---
 
