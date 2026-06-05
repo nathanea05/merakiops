@@ -52,6 +52,10 @@ omit = [
 merakiops = ["src/merakiops", "*/merakiops/src/merakiops"]
 tests = ["tests", "*/merakiops/tests"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=merakiops --cov-report=term-missing"
+
 [tool.coverage.report]
 exclude_lines = [
   "no cov",

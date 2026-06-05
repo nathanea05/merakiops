@@ -980,8 +980,10 @@ def _verify_actions(
         cls = type(obj)
         pk = _pk_key(obj)
 
-        if cls not in lookup:
+        if cls not in lookup:  # pragma: no cover
             # Model type is not supported by the verify registry.
+            # Structurally unreachable: every cls with a source_obj is added to
+            # objs_by_model and then to lookup in the loop above.
             unverifiable_by_batch[batch].append(action)
             continue
 
