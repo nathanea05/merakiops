@@ -288,3 +288,60 @@ class TestSpecialModels:
         action = Action.update(policy)
         assert action.operation == "update"
         assert "dhcpServerPolicy" in action.resource
+
+
+# ---------------------------------------------------------------------------
+# Action.raw()
+# ---------------------------------------------------------------------------
+
+
+class TestRawAction:
+    def test_raw_update_with_body(self):
+        action = Action.raw(
+            "/networks/N_1/appliance/security/malware",
+            "update",
+            {"mode": "enabled"},
+        )
+        assert action.resource == "/networks/N_1/appliance/security/malware"
+        assert action.operation == "update"
+        assert action.body == {"mode": "enabled"}
+        assert action.source_obj is None
+
+    def test_raw_create_with_body(self):
+        action = Action.raw("/networks", "create", {"name": "TestNet"})
+        assert action.operation == "create"
+        assert action.body == {"name": "TestNet"}
+
+    def test_raw_destroy_no_body(self):
+        action = Action.raw("/networks/N_1", "destroy")
+        assert action.operation == "destroy"
+        assert action.body is None
+
+    def test_raw_source_obj_is_none(self):
+        action = Action.raw("/some/path", "update", {"key": "value"})
+        assert action.source_obj is None
+
+    def test_raw_to_meraki_action_includes_body(self):
+        action = Action.raw("/some/path", "update", {"key": "value"})
+        result = action.to_meraki_action()
+        assert result["body"] == {"key": "value"}
+        assert result["resource"] == "/some/path"
+        assert result["operation"] == "update"
+
+    def test_raw_destroy_omits_body_key(self):
+        action = Action.raw("/some/path", "destroy")
+        result = action.to_meraki_action()
+        assert "body" not in result
+
+    def test_raw_empty_resource_raises(self):
+        with pytest.raises(ValueError, match="resource must be a non-empty string"):
+            Action.raw("", "update", {})
+
+    def test_raw_invalid_operation_raises(self):
+        with pytest.raises(ValueError, match="operation must be one of"):
+            Action.raw("/some/path", "patch", {})
+
+    def test_raw_is_frozen(self):
+        action = Action.raw("/some/path", "update", {"k": "v"})
+        with pytest.raises((AttributeError, TypeError)):
+            action.resource = "/other"  # type: ignore[misc]

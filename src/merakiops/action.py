@@ -19,6 +19,7 @@ class Action:
         action = Action.update(switchport)   # changed fields only
         action = Action.create(vlan)         # all fields, collection endpoint
         action = Action.destroy(vlan)        # no body, single-resource endpoint
+        action = Action.raw(path, "update", body)  # no merakisync model
 
     Each Action corresponds to one API call in the batch. The Meraki API
     supports three operations: create, update, and destroy.
@@ -142,6 +143,51 @@ class Action:
             operation="create",
             body=body,
             source_obj=obj,
+        )
+
+    @classmethod
+    def raw(
+        cls,
+        resource: str,
+        operation: str,
+        body: dict | None = None,
+    ) -> Action:
+        """Create an Action for an API endpoint with no merakisync model.
+
+        Use this for endpoints that do not have a corresponding MerakiObj in
+        merakisync. Because there is no model to compare against, these actions
+        will always appear in VerifyResult.unverifiable — this is expected, not
+        an error. Check result.batch_errors to confirm that execution succeeded.
+
+        Args:
+            resource:  The Meraki API resource path.
+                       Example: "/networks/N_abc/appliance/security/malware"
+            operation: One of "create", "update", or "destroy".
+            body:      The request body dict, or None for destroy operations.
+
+        Raises:
+            ValueError: If resource is empty or operation is not valid.
+
+        Example:
+            actions = [
+                Action.raw(
+                    resource=f"/networks/{net_id}/appliance/security/malware",
+                    operation="update",
+                    body={"mode": "enabled"},
+                )
+                for net_id in network_ids
+            ]
+            result = ActionBatch.run("123456", actions, confirmed=True)
+            if result.batch_errors:
+                print("Errors:", result.batch_errors)
+            else:
+                print(f"{len(result.unverifiable)} actions completed")
+        """
+        return cls(
+            resource=resource,
+            operation=operation,
+            body=body,
+            source_obj=None,
         )
 
     @classmethod

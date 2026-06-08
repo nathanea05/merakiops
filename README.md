@@ -69,6 +69,13 @@ print(f"Unverifiable: {len(result.unverifiable)}")
 
 Each `Action` corresponds to a single API call within a batch. Always use the factory classmethods — never instantiate `Action` directly.
 
+| Method | When to use |
+|---|---|
+| `Action.update(obj)` | Modify fields on an existing merakisync model object |
+| `Action.create(obj)` | Create a new resource from a merakisync model object |
+| `Action.destroy(obj)` | Delete a resource identified by a merakisync model object |
+| `Action.raw(path, op, body)` | Any endpoint that has no merakisync model |
+
 ### update — modify an existing resource
 
 Only the fields that changed are included in the request body. Change tracking is automatic via `_changed_fields`.
@@ -109,6 +116,33 @@ No body is sent. The resource is identified by its path alone.
 
 ```python
 action = Action.destroy(old_vlan)
+```
+
+### raw — endpoint without a merakisync model
+
+Use `Action.raw()` when the target API endpoint has no corresponding merakisync model. The action is submitted and executed normally, but it will always appear in `VerifyResult.unverifiable` because there is no model to compare the live state against. Check `result.batch_errors` to confirm execution succeeded.
+
+```python
+from merakisync.models.network import Network
+from merakiops import Action, ActionBatch
+
+network_ids = [net.id for net in Network.get(source="meraki", organization_id="123456")]
+
+actions = [
+    Action.raw(
+        resource=f"/networks/{net_id}/appliance/security/malware",
+        operation="update",
+        body={"mode": "enabled"},
+    )
+    for net_id in network_ids
+]
+
+result = ActionBatch.run("123456", actions, confirmed=True)
+
+if result.batch_errors:
+    print("Errors:", result.batch_errors)
+else:
+    print(f"{len(result.unverifiable)} actions completed")
 ```
 
 ---

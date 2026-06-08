@@ -22,9 +22,10 @@ An `Action` represents a single API change — one resource, one operation. You 
 
 | Method | When to use |
 |---|---|
-| `Action.update(obj)` | Modify fields on an existing resource |
-| `Action.create(obj)` | Create a new resource |
-| `Action.destroy(obj)` | Delete a resource |
+| `Action.update(obj)` | Modify fields on an existing merakisync model object |
+| `Action.create(obj)` | Create a new resource from a merakisync model object |
+| `Action.destroy(obj)` | Delete a resource identified by a merakisync model object |
+| `Action.raw(path, op, body)` | Any endpoint that has no merakisync model |
 
 ### ActionBatch
 
@@ -290,6 +291,41 @@ The following merakisync models are supported in all verify methods:
 | `Ssid` | 1 API call per unique network |
 | `L3FirewallRule` | 1 API call per unique network, matched by rule_order |
 | `DhcpServerPolicy` | 1 API call per unique network |
+
+Actions created with `Action.raw()` are always unverifiable — there is no model to compare against. This is expected behavior, not an error.
+
+---
+
+## Example 6 — Raw actions for endpoints without a merakisync model
+
+**Goal:** Enable AMP (Advanced Malware Protection) on all MX appliances in an org. There is no merakisync model for this endpoint, so `Action.raw()` is used.
+
+```python
+from merakisync.models.network import Network
+from merakiops import Action, ActionBatch
+
+# Fetch all networks in the org
+networks = Network.get(source="meraki", organization_id="123456")
+
+actions = [
+    Action.raw(
+        resource=f"/networks/{net.id}/appliance/security/malware",
+        operation="update",
+        body={"mode": "enabled"},
+    )
+    for net in networks
+]
+
+result = ActionBatch.run("123456", actions, confirmed=True)
+
+# Field-level verification is not possible without a model — check batch_errors instead.
+if result.batch_errors:
+    print("Batch execution errors:")
+    for err in result.batch_errors:
+        print(f"  {err}")
+else:
+    print(f"{len(result.unverifiable)} actions submitted successfully")
+```
 
 Models reported as "unverifiable" (read-only or observational):
 - `Uplink`, `UplinkUsage`, `Alert`
